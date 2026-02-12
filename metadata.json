@@ -1,0 +1,8 @@
+{
+  "name": "Copy of A3.9-F2-OK XUAT HOA DON-Bảo Minh Smart AI Store Greeter",
+  "description": "phản hồi tốt-xuyên suốt quá trình tư vấn\nAn AI-powered assistant for retail stores that greets customers and provides consultations using real-time voice and vision capabilities.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
