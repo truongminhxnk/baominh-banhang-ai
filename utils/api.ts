@@ -143,6 +143,20 @@ export async function checkPaymentByLoginId(loginId: string): Promise<CheckPayme
   }
 }
 
+/**
+ * Thử check_payment với cả hai format loginId (có dấu chấm / không dấu chấm).
+ * SePay thường gửi nội dung "VTgtam6215gmailcom" (không dấu chấm) → backend lưu loginId "gtam6215gmailcom".
+ * App dùng email.replace('@', '.') = "gtam6215.gmail.com". Gọi cả hai để khớp với backend.
+ */
+export async function checkPaymentByEmail(email: string): Promise<CheckPaymentByLoginIdResponse | null> {
+  const withDot = email.replace('@', '.');
+  const withoutDot = email.replace('@', '');
+  const data1 = await checkPaymentByLoginId(withDot);
+  if (data1?.found && data1?.user) return data1;
+  const data2 = await checkPaymentByLoginId(withoutDot);
+  return data2 ?? data1;
+}
+
 export function isApiConfigured(): boolean {
   return !!getBaseUrl();
 }
