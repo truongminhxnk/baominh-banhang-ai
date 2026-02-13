@@ -32,14 +32,27 @@ Khi người dùng đăng nhập Google thành công, app gọi **POST /api/user
 
 ## 3. Thanh toán SePay
 
-### POST `/api/payment/order`
+App hiện dùng **luồng baominh**: QR có nội dung chuyển khoản **VT-{loginId}** (loginId = email thay `@` bằng `.`), backend webhook parse nội dung để lấy loginId và cập nhật user; app **polling GET /api/check_payment/:loginId** để tự động phản hồi thanh toán thành công.
+
+### GET `/api/check_payment/:loginId` (luồng chính — giống baominh.ai.vn)
+- `loginId` = email user, thay `@` bằng `.` (vd: `user.gmail.com`).
+- Trả về: `{ found: boolean, user?: { expiryDate?: number (timestamp ms), planType?: string, premiumStartDate?: number, ... } }`.
+- App gọi mỗi 5 giây khi user đang ở bước thanh toán. Khi `user.expiryDate` tăng (so với trước khi chọn gói) → coi là thanh toán thành công, hiển thị thông báo và cập nhật gói.
+
+### POST `/api/sepay_webhook` (nội dung chuyển khoản có **VT-{loginId}**)
+- Payload SePay có `content` / `description` chứa nội dung chuyển khoản. Backend cần parse **VT-{loginId}** hoặc **VT{loginId}** (regex: `VT-?([a-zA-Z0-9_.-]+)`).
+- Xác định user theo `loginId` (khớp với email đã đăng ký, dạng email với `@` → `.`).
+- Map số tiền (`transferAmount`) với gói (vd: 250000 → 1 tháng, 700000 → 3 tháng, …), tính `expiryDate` mới, cập nhật user (và lưu payment log nếu cần). Trả về **200**.
+- App không gọi tạo đơn; chỉ cần webhook cập nhật user và API `check_payment` trả về user mới.
+
+### POST `/api/payment/order` (tùy chọn — luồng cũ theo orderId)
 - Body: `{ userId, userEmail, planId, amount, description }`
 - Trả về: `{ orderId: string, qrUrl?: string, amount: number, message?: string }`
-- Backend tạo đơn, lưu `orderId`, trả về cho app. Khi SePay gửi webhook xác nhận thanh toán, backend cập nhật trạng thái đơn.
+- Dùng nếu backend muốn luồng theo đơn + `GET /api/payment/status?orderId=xxx`. App hiện ưu tiên luồng VT-{loginId} + check_payment.
 
-### GET `/api/payment/status?orderId=xxx`
+### GET `/api/payment/status?orderId=xxx` (tùy chọn)
 - Trả về: `{ status: 'pending' | 'paid' | 'failed' | 'expired', orderId?, paidAt?, startDate?, endDate?, message? }`
-- `startDate` / `endDate`: timestamp (ms) gói premium có hiệu lực. App dùng để hiển thị ngày bắt đầu / kết thúc và cập nhật user.
+- Dùng khi backend triển khai luồng theo orderId.
 
 ## 4. Webhook SePay (backend tự implement)
 
