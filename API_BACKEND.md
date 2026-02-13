@@ -54,6 +54,42 @@ https://ai.baominh.io.vn/api/sepay_webhook
 - Backend cần tạo route **POST /api/sepay_webhook**: xác thực chữ ký (dùng `SEPAY_WEBHOOK_API_KEY` hoặc cơ chế SePay cung cấp), đọc nội dung chuyển khoản để lấy `orderId`, cập nhật đơn tương ứng `status: 'paid'`, `startDate`, `endDate`.
 - App polling `GET /api/payment/status?orderId=...` sẽ nhận được `status: 'paid'` và hiển thị thông báo thành công + ngày bắt đầu/kết thúc.
 
+### Sửa lỗi 500: "operator does not exist: json ~~ text" (PostgreSQL)
+
+Nếu webhook trả về 500 với thông báo kiểu:
+`operator does not exist: json ~~ text ... WHERE (payment.bank_info LIKE '%' || ...::JSON || '%')`
+
+**Nguyên nhân:** Cột `payment.bank_info` kiểu `JSON`/`JSONB` không dùng được toán tử `LIKE` (~~) trực tiếp với chuỗi.
+
+**Cách sửa (backend Python/SQLAlchemy):**
+
+1. **Tìm đơn theo `sepay_id` trong payload (vd `id: 42237671`):**  
+   Không dùng `Payment.bank_info.like('%...%')`. Dùng một trong hai:
+
+   - **Cách 1 – cast sang text rồi LIKE (phù hợp nếu `bank_info` là JSON):**
+     ```python
+     from sqlalchemy import cast, String
+     # Tìm bản ghi có bank_info chứa sepay_id (vd "42237671")
+     sepay_id = str(payload.get("id"))  # 42237671
+     q = session.query(Payment).filter(
+         cast(Payment.bank_info, String).like(f"%{sepay_id}%")
+     )
+     ```
+   - **Cách 2 – dùng JSONB và toán tử chứa (nếu cột là JSONB):**
+     ```python
+     # Nếu bank_info là JSONB và lưu dạng {"sepay_id": "42237671"}
+     q = session.query(Payment).filter(
+         Payment.bank_info["sepay_id"].astext == sepay_id
+     )
+     ```
+
+2. **Ghép nội dung chuyển khoản với đơn:**  
+   Payload SePay gửi có `content` (vd `"BAOMINH gtam6215 1m FT26044178920260 ..."`). App Bảo Minh tạo đơn với `description` kiểu `BAOMINH {userId} {planId}`. Backend nên:
+   - Lấy `orderId` từ bảng đơn (order/payment) đã tạo khi user bấm thanh toán (không nên tìm đơn bằng cách `bank_info LIKE '%...json...%'`).
+   - Hoặc parse `content`: tìm chuỗi có pattern `BAOMINH ... 1m` hoặc `orderId` đã lưu khi tạo đơn, rồi cập nhật đúng bản ghi đó thành `status: 'paid'`, `startDate`, `endDate`.
+
+3. **Khuyến nghị:** Khi tạo đơn (POST /api/payment/order), backend trả về `orderId` và lưu đơn với `orderId` duy nhất. Khi webhook SePay gọi tới, đối chiếu bằng `content` (có chứa mã đơn / mã giao dịch) hoặc lưu thêm `sepay_id` vào cột text/JSON và tìm theo `sepay_id` bằng cast text như trên, sau đó cập nhật đúng một đơn thành đã thanh toán và trả về 200. Khi đó app polling `GET /api/payment/status?orderId=...` sẽ nhận `status: 'paid'` và tự động hiển thị thành công.
+
 ## 5. Giới hạn 1 thiết bị (tài khoản Premium)
 
 Tài khoản Premium chỉ được đăng nhập trên **một thiết bị** tại một thời điểm. Khi user đăng nhập trên thiết bị thứ 2, thiết bị cũ sẽ bị đăng xuất (sau tối đa ~45 giây khi app kiểm tra phiên).
