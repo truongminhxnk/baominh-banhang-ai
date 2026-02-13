@@ -6,7 +6,7 @@ import { jwtDecode } from 'jwt-decode';
 import { decode, encode, decodeAudioData, playUISound, blobToBase64 } from './utils/audioHelpers';
 import CameraView from './components/CameraView';
 import { SessionStatus, Transcription, Product, CartItem, Invoice, StockLog, Customer, PreOrder, UserProfile, PricingPlan } from './types';
-import { loadStoreData, saveStoreData, checkPaymentStatus, createPaymentOrder, isApiConfigured, registerDevice, checkSession, getOrCreateDeviceId, registerUserOnServer, checkPaymentByLoginId } from './utils/api';
+import { loadStoreData, saveStoreData, checkPaymentStatus, createPaymentOrder, isApiConfigured, registerDevice, checkSession, getOrCreateDeviceId, registerUserOnServer, checkPaymentByLoginId, checkPaymentByEmail } from './utils/api';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 
@@ -770,16 +770,14 @@ const App: React.FC = () => {
           return;
       }
 
-      // Luồng baominh: kiểm tra theo loginId (GET /api/check_payment/:loginId), không cần tạo đơn
-      const loginId = paymentLoginId || user.email?.replace('@', '.') || '';
-      if (!loginId) {
+      if (!user.email) {
           setIsVerifyingPayment(false);
-          setPaymentVerifyError('Không xác định được mã thanh toán.');
+          setPaymentVerifyError('Không xác định được tài khoản.');
           return;
       }
 
       const doCheck = async (): Promise<boolean> => {
-          const data = await checkPaymentByLoginId(loginId);
+          const data = await checkPaymentByEmail(user.email);
           if (!data?.found || !data.user?.expiryDate) return false;
           const newExpiry = data.user.expiryDate;
           const prevExpiry = lastCheckedExpiryRef.current || user?.expiryDate || 0;
@@ -798,7 +796,7 @@ const App: React.FC = () => {
           return;
       }
       // Polling đã chạy từ useEffect khi chọn gói; giữ isVerifyingPayment true đến khi phát hiện thành công hoặc đóng modal
-  }, [selectedPlan, user, paymentLoginId, applyPaymentSuccess]);
+  }, [selectedPlan, user, applyPaymentSuccess]);
 
   const handleClosePaymentSuccess = () => {
       setPaymentSuccess(null);
@@ -811,17 +809,16 @@ const App: React.FC = () => {
       if (showPaywall) setPaymentVerifyError(null);
   }, [showPaywall]);
 
-  // Luồng baominh: khi đã chọn gói và có API, tự động polling GET /api/check_payment/:loginId mỗi 5s; phát hiện expiryDate tăng thì báo thành công
+  // Luồng baominh: khi đã chọn gói và có API, tự động polling check_payment mỗi 5s; thử cả loginId có dấu chấm và không dấu chấm (SePay có thể gửi "VTgtam6215gmailcom")
   useEffect(() => {
       if (!selectedPlan || !user?.email || !isApiConfigured()) return;
-      const loginId = user.email.replace('@', '.');
       lastCheckedExpiryRef.current = user.expiryDate || user.trialStartDate || 0;
       setIsVerifyingPayment(true);
 
       const PAYMENT_POLL_INTERVAL_MS = 5000;
       const PAYMENT_POLL_MAX_MINUTES = 10;
       const interval = setInterval(async () => {
-          const data = await checkPaymentByLoginId(loginId);
+          const data = await checkPaymentByEmail(user.email);
           if (!data?.found || !data.user?.expiryDate) return;
           const newExpiry = data.user.expiryDate;
           const prev = lastCheckedExpiryRef.current;

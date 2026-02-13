@@ -41,8 +41,9 @@ App hiện dùng **luồng baominh**: QR có nội dung chuyển khoản **VT-{l
 
 ### POST `/api/sepay_webhook` (nội dung chuyển khoản có **VT-{loginId}**)
 - Payload SePay có `content` / `description` chứa nội dung chuyển khoản. Backend cần parse **VT-{loginId}** hoặc **VT{loginId}** (regex: `VT-?([a-zA-Z0-9_.-]+)`).
+- **Chuẩn hóa loginId từ nội dung chuyển khoản:** Ngân hàng/SePay có thể gửi nội dung **không có dấu chấm** (vd: `VTgtam6215gmailcom`). User đăng ký bằng email `gtam6215@gmail.com` → app poll với cả `gtam6215.gmail.com` và `gtam6215gmailcom`. Backend nên **chuẩn hóa** loginId nhận được (vd: `gtam6215gmailcom` → thử tìm user có email `gtam6215@gmail.com`, tức loginId `gtam6215.gmail.com`) hoặc lưu/tìm user theo **cả hai** dạng (có dấu chấm và không dấu chấm) để `GET /api/check_payment/:loginId` trả về đúng user dù app gửi loginId có hoặc không có dấu chấm.
 - Xác định user theo `loginId` (khớp với email đã đăng ký, dạng email với `@` → `.`).
-- Map số tiền (`transferAmount`) với gói (vd: 250000 → 1 tháng, 700000 → 3 tháng, …), tính `expiryDate` mới, cập nhật user (và lưu payment log nếu cần). Trả về **200**.
+- Map số tiền (`transferAmount`) với gói (vd: **250000** → 1 tháng, **700000** → 3 tháng, **1350000** → 6 tháng, **2500000** → 1 năm), tính `expiryDate` mới, cập nhật user (và lưu payment log nếu cần). Trả về **200**.
 - App không gọi tạo đơn; chỉ cần webhook cập nhật user và API `check_payment` trả về user mới.
 
 ### POST `/api/payment/order` (tùy chọn — luồng cũ theo orderId)
@@ -64,8 +65,70 @@ https://ai.baominh.io.vn/api/sepay_webhook
 
 - Trên SePay.vn bạn cấu hình **Địa chỉ webhook / URL nhận thông báo** = `https://ai.baominh.io.vn/api/sepay_webhook`.
 - SePay gửi **POST** tới URL này khi có giao dịch (chuyển khoản thành công, v.v.).
-- Backend cần tạo route **POST /api/sepay_webhook**: xác thực chữ ký (dùng `SEPAY_WEBHOOK_API_KEY` hoặc cơ chế SePay cung cấp), đọc nội dung chuyển khoản để lấy `orderId`, cập nhật đơn tương ứng `status: 'paid'`, `startDate`, `endDate`.
-- App polling `GET /api/payment/status?orderId=...` sẽ nhận được `status: 'paid'` và hiển thị thông báo thành công + ngày bắt đầu/kết thúc.
+- Backend cần tạo route **POST /api/sepay_webhook**: xác thực chữ ký (dùng `SEPAY_WEBHOOK_API_KEY` hoặc cơ chế SePay cung cấp), đọc nội dung chuyển khoản để lấy `orderId` hoặc **VT-{loginId}**, cập nhật user/đơn và trả **200**.
+- Nếu webhook trả 404/500, SePay coi như thất bại → **không có phản hồi tự động gia hạn** dù khách đã chuyển khoản thành công.
+
+### Sửa lỗi 404: "Cannot POST /api/sepay_webhook" (không phản hồi tự động gia hạn)
+
+**Triệu chứng:** SePay gọi `https://ai.baominh.io.vn/api/sepay_webhook` nhưng server trả **404** với nội dung `Cannot POST /api/sepay_webhook`. Thanh toán đã thành công nhưng app không tự động gia hạn vì backend không nhận được webhook.
+
+**Nguyên nhân:** Domain **ai.baominh.io.vn** đang chỉ phục vụ **frontend tĩnh** (HTML/JS). Không có server xử lý **POST /api/sepay_webhook**, nên mọi request tới `/api/*` bị 404.
+
+**Cách xử lý (chọn một):**
+
+1. **Proxy /api từ ai.baominh.io.vn sang backend đã chạy (vd: tts.baominh.io.vn)**  
+   Nếu bạn đã có backend webhook chạy tại **tts.baominh.io.vn** (trả 200 khi gọi `/api/sepay_webhook`), cấu hình **Nginx** trên server host **ai.baominh.io.vn** để chuyển tiếp `/api/*` tới đó:
+
+   ```nginx
+   server {
+       server_name ai.baominh.io.vn;
+       root /var/www/ai/dist;
+       index index.html;
+       location / {
+           try_files $uri $uri/ /index.html;
+       }
+       location /api/ {
+           proxy_pass https://tts.baominh.io.vn;
+           proxy_http_version 1.1;
+           proxy_set_header Host $host;
+           proxy_set_header X-Real-IP $remote_addr;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+       }
+   }
+   ```
+
+   Sau khi reload Nginx, SePay gọi `https://ai.baominh.io.vn/api/sepay_webhook` sẽ được proxy tới **tts.baominh.io.vn** → backend xử lý → trả 200.  
+   **Quan trọng:** Trong app (`.env.production`), đặt `VITE_API_URL=https://ai.baominh.io.vn/api` (hoặc `https://tts.baominh.io.vn/api` nếu app gọi thẳng tts) để `check_payment` và các API khác dùng cùng backend.
+
+2. **Đổi URL webhook trên SePay sang thẳng backend**  
+   Trên dashboard SePay.vn, đặt **Địa chỉ webhook** = URL backend đã có route webhook, ví dụ:  
+   `https://tts.baominh.io.vn/api/sepay_webhook`  
+   Khi đó không cần proxy trên ai.baominh.io.vn. Đảm bảo `VITE_API_URL` trong app trỏ tới cùng backend (vd: `https://tts.baominh.io.vn/api`) để `GET /api/check_payment/:loginId` hoạt động.
+
+### Sửa: Webhook trả 200 nhưng "Unknown amount, ignore" (không gia hạn)
+
+**Triệu chứng:** SePay gọi webhook → server trả **200** với body `{"ok":true,"message":"Unknown amount, ignore"}`. Thanh toán đã thành công nhưng backend **bỏ qua** giao dịch vì không nhận diện số tiền.
+
+**Nguyên nhân:** Backend (vd: tts.baominh.io.vn) map số tiền → gói qua bảng cấu hình (vd: `PLAN_CONFIG`). App Bảo Minh AI dùng các mức: **250000** (1 tháng), **700000** (3 tháng), **1350000** (6 tháng), **2500000** (1 năm). Nếu backend chỉ có 150000, 450000, 900000, 1800000 thì `transferAmount: 250000` sẽ bị coi là "Unknown amount" và bỏ qua.
+
+**Cách xử lý:** Trên backend (server xử lý webhook tại tts.baominh.io.vn hoặc ai.baominh.io.vn), bổ sung mapping đúng với giá gói của app:
+
+| transferAmount (VND) | Gói   | Tháng |
+|---------------------|-------|-------|
+| 250000              | 1 tháng | 1     |
+| 700000              | 3 tháng | 3     |
+| 1350000             | 6 tháng | 6     |
+| 2500000             | 1 năm   | 12    |
+
+Ví dụ (Node/Express): `const PLAN_CONFIG = { 250000: { planType: '1m', months: 1 }, 700000: { planType: '3m', months: 3 }, 1350000: { planType: '6m', months: 6 }, 2500000: { planType: '1y', months: 12 } };`  
+Sau khi thêm, webhook sẽ cập nhật user (expiryDate, planType) và trả 200; app polling `check_payment` sẽ nhận và hiển thị gia hạn thành công.
+
+### Phản hồi thanh toán không hiện (app poll nhưng không báo thành công)
+
+- **1) loginId không khớp:** Nội dung chuyển khoản từ ngân hàng có thể là `VTgtam6215gmailcom` (không dấu chấm). Backend lưu/tìm user theo loginId đó; app gửi `check_payment(gtam6215.gmail.com)` → không trùng. **App đã sửa:** khi poll gọi `check_payment` với **cả hai** loginId (có dấu chấm và không dấu chấm). **Backend nên:** chuẩn hóa loginId từ nội dung (vd. `gmailcom` → `.gmail.com`) hoặc khi `check_payment/:loginId` nhận cả hai dạng và trả về cùng user.
+- **2) VITE_API_URL trỏ sai:** Nếu `VITE_API_URL=https://ai.baominh.io.vn/api` mà domain đó không có backend (chỉ frontend tĩnh), `GET /api/check_payment/:loginId` sẽ 404 → app không nhận được dữ liệu. Cấu hình proxy `/api` sang backend (xem mục 404 webhook) hoặc đặt `VITE_API_URL` trỏ thẳng tới backend (vd. `https://tts.baominh.io.vn/api`).
+- **3) Webhook bỏ qua giao dịch:** "Unknown amount" → backend không cập nhật user → dù poll đúng loginId cũng không thấy `expiryDate` đổi. Bổ sung map 250000, 700000, 1350000, 2500000 như bảng trên.
 
 ### Sửa lỗi 500: "operator does not exist: json ~~ text" (PostgreSQL)
 
