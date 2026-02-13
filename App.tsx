@@ -6,7 +6,7 @@ import { jwtDecode } from 'jwt-decode';
 import { decode, encode, decodeAudioData, playUISound, blobToBase64 } from './utils/audioHelpers';
 import CameraView from './components/CameraView';
 import { SessionStatus, Transcription, Product, CartItem, Invoice, StockLog, Customer, PreOrder, UserProfile, PricingPlan } from './types';
-import { loadStoreData, saveStoreData, checkPaymentStatus, createPaymentOrder, isApiConfigured, registerDevice, checkSession, getOrCreateDeviceId } from './utils/api';
+import { loadStoreData, saveStoreData, checkPaymentStatus, createPaymentOrder, isApiConfigured, registerDevice, checkSession, getOrCreateDeviceId, registerUserOnServer } from './utils/api';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 
@@ -26,6 +26,8 @@ interface UIAudioSettings {
 // --- CONSTANTS & CONFIG ---
 const TRIAL_DAYS = 14;
 const DAILY_LIMIT_MINUTES = 30;
+const ZALO_PHONE = '0986234983'; // Quét QR Zalo tư vấn sử dụng
+const ZALO_QR_URL = `https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent('https://zalo.me/' + ZALO_PHONE)}`;
 const PRICING_PLANS: PricingPlan[] = [
   { id: '1m', name: 'Gói 1 Tháng', durationMonths: 1, price: 250000, description: 'Trải nghiệm đầy đủ tính năng.' },
   { id: '3m', name: 'Gói 3 Tháng', durationMonths: 3, price: 700000, originalPrice: 750000, description: 'Tiết kiệm 50.000đ.' },
@@ -158,6 +160,8 @@ const TRANSLATIONS = {
     planPremium: 'Premium',
     back: 'Quay lại',
     crmTitle: 'QUẢN LÝ KHÁCH HÀNG (CRM)',
+    zaloConsult: 'Tư vấn Zalo',
+    zaloConsultDesc: 'Quét QR để nhắn tin tư vấn sử dụng',
     logs: {
         connected: 'Đã kết nối',
         disconnected: 'Đã ngắt kết nối',
@@ -301,6 +305,8 @@ const TRANSLATIONS = {
     planPremium: 'Premium',
     back: 'Back',
     crmTitle: 'CUSTOMER MANAGEMENT (CRM)',
+    zaloConsult: 'Zalo support',
+    zaloConsultDesc: 'Scan QR to chat for usage support',
     logs: {
         connected: 'Connected',
         disconnected: 'Disconnected',
@@ -332,7 +338,7 @@ const TRANSLATIONS = {
   zh: {
     roleStaff: '经理', roleCustomer: '顾客', statusIdle: '就绪', statusListening: '正在聆听...', statusSpeaking: 'AI 正在说话...', statusConnecting: '正在连接...', statusReconnecting: '重新连接...', statusOffline: '离线', statusStop: '停止会话', statusStart: '开始', tabChat: '聊天', tabPos: '收银', tabCrm: '客户', tabLogs: '日志', tabSettings: '设置', invoiceTitle: '销售收据', invoiceTitleA4: '零售发票', customer: '顾客', phone: '电话', addressLabel: '地址', date: '日期', cashier: '收银员', slipNo: '单号', time: '时间', item: '商品名称', qty: '数量', unit: '单位', price: '单价', amount: '金额', subtotal: '小计', tax: '增值税 (0%)', total: '总计', thankYou: '谢谢惠顾！', seeYou: '欢迎下次光临！', printPdf: '🖨 打印发票', remoteMicOn: '🎤 远程麦克风：开启', standbyMode: '待机模式', camVision: '摄像头视觉', pirSensor: 'PIR 传感器', storeName: '商店名称', website: '网站', hotline: '热线', address: '地址', save: '保存', backup: '备份 (.JSON)', restore: '恢复', historyChat: '聊天记录', clear: '清除', home: '主页', systemLog: '系统日志', promotionContent: '促销活动 & 内容', productList: '产品列表', importFile: '📎 上传文档', uploadCatalog: '⬆ 上传目录', pay: '结账', addToCart: '+ 添加', importStock: '+ 入库', searchCrm: '搜索客户 (姓名/电话)...', orderList: '预订订单', customerList: '客户列表', wait: '等待', buyerSig: '买方', sellerSig: '卖方', sigNote: '(签字及全名)', checkoutTitle: '结账信息', requiredInfo: '请输入保修信息', confirmPay: '确认并打印', cancel: '取消', systemPrompt: `(系统：顾客刚进门。请根据他们的外貌/语言大声用中文、英文或越南语打招呼：“你好！欢迎光临 [Store Name]！”然后询问有什么可以帮到他们。)`,
     loginTitle: '需要登录', loginDesc: '使用 Google 帐户访问。', btnLoginGoogle: '继续使用 Google', trialBanner: '试用期：剩 {days} 天。今日剩余：{minutes} 分钟。', premiumBanner: '高级版：{start} ➔ {end}', upgradeTitle: '升级到高级版', upgradeDesc: '试用期已过或达到每日限制。请选择套餐。', bankTransfer: 'SePay 二维码转账', scanQr: '扫码支付', iHavePaid: '我已付款', checkingPayment: '正在检查...', paymentSuccess: '支付成功！谢谢。', paymentSuccessDetail: '套餐已激活。\n有效期：{start} 至 {end}', limitReached: '今日试用时间已达上限 (30分钟)。', trialExpired: '14天试用期已结束。',
-    apiConfig: 'API 配置', enterApiKey: '输入 Gemini API Key...', add: '添加', remove: '移除', storeProfile: '商店资料', storeNamePlaceholder: '商店名称', hotlinePlaceholder: '热线', websitePlaceholder: '网站', addressPlaceholder: '地址', promotionPlaceholder: '促销信息 / 政策...', hardwareConnection: '硬件与连接', esp32IpPlaceholder: 'ESP32 摄像头 IP 地址 (例如 192.168.1.5)', test: '测试', remoteMic: '远程麦克风 (ESP32)', pirSensorMode: 'PIR 传感器模式', voiceOnly: '仅语音 (无摄像头)', systemData: '系统数据', backupData: '备份数据 (.json)', restoreData: '恢复数据', cartTitle: '购物车', clearCart: '清空', items: '件', confirmClearHistory: '您确定要清除聊天记录吗？', validationError: '请填写所有必填字段。', subscription: '订阅', extendPlan: '续费 / 升级', planFree: '试用', planPremium: '高级版', back: '返回', crmTitle: '客户关系管理 (CRM)',
+    apiConfig: 'API 配置', enterApiKey: '输入 Gemini API Key...', add: '添加', remove: '移除', storeProfile: '商店资料', storeNamePlaceholder: '商店名称', hotlinePlaceholder: '热线', websitePlaceholder: '网站', addressPlaceholder: '地址', promotionPlaceholder: '促销信息 / 政策...', hardwareConnection: '硬件与连接', esp32IpPlaceholder: 'ESP32 摄像头 IP 地址 (例如 192.168.1.5)', test: '测试', remoteMic: '远程麦克风 (ESP32)', pirSensorMode: 'PIR 传感器模式', voiceOnly: '仅语音 (无摄像头)', systemData: '系统数据', backupData: '备份数据 (.json)', restoreData: '恢复数据', cartTitle: '购物车', clearCart: '清空', items: '件', confirmClearHistory: '您确定要清除聊天记录吗？', validationError: '请填写所有必填字段。', subscription: '订阅', extendPlan: '续费 / 升级', planFree: '试用', planPremium: '高级版', back: '返回', crmTitle: '客户关系管理 (CRM)', zaloConsult: 'Zalo 咨询', zaloConsultDesc: '扫码咨询使用',
     logs: {
         connected: '已连接', disconnected: '已断开', cameraError: '摄像头错误', micConnected: '远程麦克风已连接', motionDetected: '检测到运动',
         initializing: '正在初始化 AI...', restoring: '正在恢复上下文...', backupSuccess: '备份成功。', restoreSuccess: '恢复成功！', restoreFail: '备份文件无效。', fileProcessed: '文件已处理。', fileSent: '文件已发送给 AI。', errorSending: '发送文件错误。', socketError: 'Socket 错误', sensorFail: '传感器连接失败', timeout: '超时', cameraConnected: '摄像头已连接！',
@@ -342,7 +348,7 @@ const TRANSLATIONS = {
   ja: {
     roleStaff: 'マネージャー', roleCustomer: 'お客様', statusIdle: '準備完了', statusListening: '聞いています...', statusSpeaking: 'AIが話しています...', statusConnecting: '接続中...', statusReconnecting: '再接続中...', statusOffline: 'オフライン', statusStop: '停止', statusStart: '開始', tabChat: 'チャット', tabPos: 'POS', tabCrm: '顧客', tabLogs: 'ログ', tabSettings: '設定', invoiceTitle: '領収書', invoiceTitleA4: '小売請求書', customer: 'お客様', phone: '電話番号', addressLabel: '住所', date: '日付', cashier: '担当者', slipNo: '伝票番号', time: '時間', item: '商品名', qty: '数量', unit: '単位', price: '単価', amount: '金額', subtotal: '小計', tax: '消費税 (0%)', total: '合計', thankYou: 'ご利用ありがとうございます！', seeYou: 'またのご来店をお待ちしております！', printPdf: '🖨 請求書を印刷', remoteMicOn: '🎤 リモートマイク：オン', standbyMode: 'スタンバイモード', camVision: 'カメラビジョン', pirSensor: 'PIRセンサー', storeName: '店舗名', website: 'ウェブサイト', hotline: 'ホットライン', address: '住所', save: '保存', backup: 'バックアップ (.JSON)', restore: '復元', historyChat: 'チャット履歴', clear: 'クリア', home: 'ホーム', systemLog: 'システムログ', promotionContent: 'プロモーション & コンテンツ', productList: '商品一覧', importFile: '📎 ドキュメント', uploadCatalog: '⬆ カタログ', pay: '会計', addToCart: '+ 追加', importStock: '+ 入庫', searchCrm: '顧客検索 (名前/電話)...', orderList: '予約注文', customerList: '顧客リスト', wait: '待機中', buyerSig: '購入者', sellerSig: '販売者', sigNote: '(署名と氏名)', checkoutTitle: 'チェックアウト情報', requiredInfo: '保証のために情報を入力してください', confirmPay: '確認して印刷', cancel: 'キャンセル', systemPrompt: `(システム：お客様が入店しました。外見や言語に応じて、日本語、英語、またはベトナム語で明るく挨拶してください：「いらっしゃいませ！ [Store Name] へようこそ！」その後、ご用件をお伺いしてください。)`,
     loginTitle: 'ログインが必要です', loginDesc: 'Googleアカウントを使用してアクセスしてください。', btnLoginGoogle: 'Googleで続行', trialBanner: '試用期間: 残り {days} 日。 本日残り: {minutes} 分。', premiumBanner: 'プレミアム: {start} ➔ {end}', upgradeTitle: 'プレミアムにアップグレード', upgradeDesc: '試用期間が終了したか、1日の制限に達しました。プランを選択してください。', bankTransfer: 'SePay QR送金', scanQr: 'QRコードをスキャンして支払う', iHavePaid: '支払いました', checkingPayment: '確認中...', paymentSuccess: '支払いが完了しました！ありがとうございます。', paymentSuccessDetail: 'プランが有効化されました。\n有効期間: {start} から {end}', limitReached: '本日の試用制限（30分）に達しました。', trialExpired: '14日間の試用期間が終了しました。',
-    apiConfig: 'API設定', enterApiKey: 'Gemini APIキーを入力...', add: '追加', remove: '削除', storeProfile: '店舗プロフィール', storeNamePlaceholder: '店舗名', hotlinePlaceholder: 'ホットライン', websitePlaceholder: 'ウェブサイト', addressPlaceholder: '住所', promotionPlaceholder: 'プロモーション / ポリシー...', hardwareConnection: 'ハードウェアと接続', esp32IpPlaceholder: 'ESP32 IPカメラアドレス (例: 192.168.1.5)', test: 'テスト', remoteMic: 'リモートマイク (ESP32)', pirSensorMode: 'PIRセンサーモード', voiceOnly: '音声のみ (カメラなし)', systemData: 'システムデータ', backupData: 'データをバックアップ (.json)', restoreData: 'データを復元', cartTitle: 'カート', clearCart: 'すべて削除', items: '点', confirmClearHistory: 'チャット履歴を消去してもよろしいですか？', validationError: 'すべての必須項目を入力してください。', subscription: 'サブスクリプション', extendPlan: '延長 / アップグレード', planFree: 'トライアル', planPremium: 'プレミアム', back: '戻る', crmTitle: '顧客管理 (CRM)',
+    apiConfig: 'API設定', enterApiKey: 'Gemini APIキーを入力...', add: '追加', remove: '削除', storeProfile: '店舗プロフィール', storeNamePlaceholder: '店舗名', hotlinePlaceholder: 'ホットライン', websitePlaceholder: 'ウェブサイト', addressPlaceholder: '住所', promotionPlaceholder: 'プロモーション / ポリシー...', hardwareConnection: 'ハードウェアと接続', esp32IpPlaceholder: 'ESP32 IPカメラアドレス (例: 192.168.1.5)', test: 'テスト', remoteMic: 'リモートマイク (ESP32)', pirSensorMode: 'PIRセンサーモード', voiceOnly: '音声のみ (カメラなし)', systemData: 'システムデータ', backupData: 'データをバックアップ (.json)', restoreData: 'データを復元', cartTitle: 'カート', clearCart: 'すべて削除', items: '点', confirmClearHistory: 'チャット履歴を消去してもよろしいですか？', validationError: 'すべての必須項目を入力してください。', subscription: 'サブスクリプション', extendPlan: '延長 / アップグレード', planFree: 'トライアル', planPremium: 'プレミアム', back: '戻る', crmTitle: '顧客管理 (CRM)', zaloConsult: 'Zaloサポート', zaloConsultDesc: 'QRでスキャンして相談',
     logs: {
         connected: '接続済み', disconnected: '切断されました', cameraError: 'カメラエラー', micConnected: 'リモートマイク接続済み', motionDetected: '動きを検知',
         initializing: 'AIを初期化中...', restoring: 'コンテキストを復元中...', backupSuccess: 'バックアップ成功。', restoreSuccess: '復元成功！', restoreFail: 'バックアップファイルが無効です。', fileProcessed: 'ファイル処理完了。', fileSent: 'ファイルをAIに送信しました。', errorSending: 'ファイル送信エラー。', socketError: 'ソケットエラー', sensorFail: 'センサー接続失敗', timeout: 'タイムアウト', cameraConnected: 'カメラ接続完了！',
@@ -352,7 +358,7 @@ const TRANSLATIONS = {
   ko: {
     roleStaff: '관리자', roleCustomer: '고객', statusIdle: '준비', statusListening: '듣고 있습니다...', statusSpeaking: 'AI가 말하는 중...', statusConnecting: '연결 중...', statusReconnecting: '재연결 중...', statusOffline: '오프라인', statusStop: '중지', statusStart: '시작', tabChat: '채팅', tabPos: 'POS', tabCrm: '고객', tabLogs: '로그', tabSettings: '설정', invoiceTitle: '영수증', invoiceTitleA4: '소매 영수증', customer: '고객', phone: '전화번호', addressLabel: '주소', date: '날짜', cashier: '계산원', slipNo: '전표 번호', time: '시간', item: '상품명', qty: '수량', unit: '단위', price: '단가', amount: '금액', subtotal: '소계', tax: '부가세 (0%)', total: '총계', thankYou: '감사합니다!', seeYou: '또 뵙겠습니다!', printPdf: '🖨 청구서 인쇄', remoteMicOn: '🎤 원격 마이크: 켜짐', standbyMode: '대기 모드', camVision: '카메라 비전', pirSensor: 'PIR 센서', storeName: '상점 이름', website: '웹사이트', hotline: '핫라인', address: '주소', save: '저장', backup: '백업 (.JSON)', restore: '복원', historyChat: '채팅 기록', clear: '지우기', home: '홈', systemLog: '시스템 로그', promotionContent: '프로모션 & 콘텐츠', productList: '제품 목록', importFile: '📎 문서 업로드', uploadCatalog: '⬆ 카탈로그', pay: '결제', addToCart: '+ 추가', importStock: '+ 입고', searchCrm: '고객 검색 (이름/전화)...', orderList: '선주문', customerList: '고객 목록', wait: '대기', buyerSig: '구매자', sellerSig: '판매자', sigNote: '(서명 및 성명)', checkoutTitle: '결제 정보', requiredInfo: '보증을 위해 정보를 입력하십시오', confirmPay: '확인 및 인쇄', cancel: '취소', systemPrompt: `(시스템: 손님이 막 들어왔습니다. 외모/언어에 따라 한국어, 영어 또는 베트남어로 밝게 인사하십시오: "안녕하세요! [Store Name] 에 오신 것을 환영합니다!" 그 후 무엇을 도와드릴지 물어보십시오.)`,
     loginTitle: '로그인 필요', loginDesc: 'Google 계정을 사용하여 액세스하십시오.', btnLoginGoogle: 'Google로 계속', trialBanner: '체험판: {days}일 남음. 오늘 남은 시간: {minutes}분.', premiumBanner: '프리미엄: {start} ➔ {end}', upgradeTitle: '프리미엄으로 업그레이드', upgradeDesc: '체험 기간이 만료되었거나 일일 한도에 도달했습니다. 요금제를 선택하십시오.', bankTransfer: 'SePay QR 이체', scanQr: 'QR 스캔하여 결제', iHavePaid: '결제했습니다', checkingPayment: '확인 중...', paymentSuccess: '결제가 완료되었습니다! 감사합니다.', paymentSuccessDetail: '요금제가 활성화되었습니다.\n유효 기간: {start} ~ {end}', limitReached: '일일 한도(30분)에 도달했습니다.', trialExpired: '14일 체험 기간이 만료되었습니다.',
-    apiConfig: 'API 구성', enterApiKey: 'Gemini API 키 입력...', add: '추가', remove: '제거', storeProfile: '상점 프로필', storeNamePlaceholder: '상점 이름', hotlinePlaceholder: '핫라인', websitePlaceholder: '웹사이트', addressPlaceholder: '주소', promotionPlaceholder: '프로모션 / 정책...', hardwareConnection: '하드웨어 및 연결', esp32IpPlaceholder: 'ESP32 IP 카메라 주소 (예: 192.168.1.5)', test: '테스트', remoteMic: '원격 마이크 (ESP32)', pirSensorMode: 'PIR 센서 모드', voiceOnly: '음성 전용 (카메라 없음)', systemData: '시스템 데이터', backupData: '데이터 백업 (.json)', restoreData: '데이터 복원', cartTitle: '장바구니', clearCart: '모두 지우기', items: '아이템', confirmClearHistory: '채팅 기록을 지우시겠습니까?', validationError: '모든 필수 입력란을 채워주세요.', subscription: '구독', extendPlan: '연장 / 업그레이드', planFree: '무료 체험', planPremium: '프리미엄', back: '뒤로', crmTitle: '고객 관리 (CRM)',
+    apiConfig: 'API 구성', enterApiKey: 'Gemini API 키 입력...', add: '추가', remove: '제거', storeProfile: '상점 프로필', storeNamePlaceholder: '상점 이름', hotlinePlaceholder: '핫라인', websitePlaceholder: '웹사이트', addressPlaceholder: '주소', promotionPlaceholder: '프로모션 / 정책...', hardwareConnection: '하드웨어 및 연결', esp32IpPlaceholder: 'ESP32 IP 카메라 주소 (예: 192.168.1.5)', test: '테스트', remoteMic: '원격 마이크 (ESP32)', pirSensorMode: 'PIR 센서 모드', voiceOnly: '음성 전용 (카메라 없음)', systemData: '시스템 데이터', backupData: '데이터 백업 (.json)', restoreData: '데이터 복원', cartTitle: '장바구니', clearCart: '모두 지우기', items: '아이템', confirmClearHistory: '채팅 기록을 지우시겠습니까?', validationError: '모든 필수 입력란을 채워주세요.', subscription: '구독', extendPlan: '연장 / 업그레이드', planFree: '무료 체험', planPremium: '프리미엄', back: '뒤로', crmTitle: '고객 관리 (CRM)', zaloConsult: 'Zalo 지원', zaloConsultDesc: 'QR 스캔하여 문의',
     logs: {
         connected: '연결됨', disconnected: '연결 끊김', cameraError: '카메라 오류', micConnected: '원격 마이크 연결됨', motionDetected: '동작 감지됨',
         initializing: 'AI 초기화 중...', restoring: '컨텍스트 복원 중...', backupSuccess: '백업 성공.', restoreSuccess: '복원 성공!', restoreFail: '잘못된 백업 파일입니다.', fileProcessed: '파일 처리됨.', fileSent: '파일이 AI로 전송됨.', errorSending: '파일 전송 오류.', socketError: '소켓 오류', sensorFail: '센서 연결 실패', timeout: '시간 초과', cameraConnected: '카메라 연결됨!',
@@ -466,7 +472,18 @@ const App: React.FC = () => {
   // --- AUTH & SUBSCRIPTION STATE ---
   const [user, setUser] = useState<UserProfile | null>(() => {
     const saved = localStorage.getItem('bm_user_profile');
-    return saved ? JSON.parse(saved) : null;
+    if (!saved) return null;
+    try {
+      const profile = JSON.parse(saved) as UserProfile;
+      // Không dùng tài khoản demo — bắt buộc đăng nhập Google
+      if (profile?.email === 'demo@baominh.ai') {
+        localStorage.removeItem('bm_user_profile');
+        return null;
+      }
+      return profile;
+    } catch {
+      return null;
+    }
   });
   const [showLoginModal, setShowLoginModal] = useState(!user);
   const [showPaywall, setShowPaywall] = useState(false);
@@ -479,6 +496,7 @@ const App: React.FC = () => {
   const [selectedPlan, setSelectedPlan] = useState<PricingPlan | null>(null);
   const [isVerifyingPayment, setIsVerifyingPayment] = useState(false);
   const [paymentSuccess, setPaymentSuccess] = useState<{ startDate: number; endDate: number } | null>(null);
+  const [paymentVerifyError, setPaymentVerifyError] = useState<string | null>(null);
   const paymentPollCountRef = useRef(0);
   const [kickedMessage, setKickedMessage] = useState<string | null>(null);
   const [deviceRegisteredRevoked, setDeviceRegisteredRevoked] = useState(false);
@@ -687,40 +705,37 @@ const App: React.FC = () => {
   }, [checkLimits, dailyMinutesUsed]);
 
   const googleClientId = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID as string | undefined;
+  const [loginError, setLoginError] = useState<string | null>(null);
 
   // --- HANDLERS FOR AUTH & PAYMENT ---
-  const handleLogin = () => {
-      // Mock login khi chưa cấu hình Google Client ID
-      triggerUISound('click');
-      const mockUser: UserProfile = {
-          email: 'demo@baominh.ai',
-          name: 'Bao Minh User',
-          trialStartDate: Date.now(),
-          isPremium: false
-      };
-      setUser(mockUser);
-      localStorage.setItem('bm_user_profile', JSON.stringify(mockUser));
-      setShowLoginModal(false);
-      triggerUISound('success');
-  };
-
-  const handleGoogleLoginSuccess = (credentialResponse: { credential?: string }) => {
+  const handleGoogleLoginSuccess = async (credentialResponse: { credential?: string }) => {
+      setLoginError(null);
       if (!credentialResponse.credential) return;
       try {
           const decoded = jwtDecode<{ email?: string; name?: string }>(credentialResponse.credential);
+          const trialStart = Date.now();
           const profile: UserProfile = {
               email: decoded.email || 'user@gmail.com',
               name: decoded.name || 'User',
-              trialStartDate: Date.now(),
+              trialStartDate: trialStart,
               isPremium: false
           };
           setUser(profile);
           localStorage.setItem('bm_user_profile', JSON.stringify(profile));
           setShowLoginModal(false);
           triggerUISound('success');
+          // Đồng bộ user lên VPS: tạo/cập nhật danh sách người dùng để quản lý và gia hạn
+          if (isApiConfigured()) {
+              const reg = await registerUserOnServer({ email: profile.email, name: profile.name, trialStartDate: trialStart });
+              if (reg?.userProfile) {
+                  setUser((prev) => prev ? { ...prev, ...reg.userProfile } : prev);
+                  const merged = { ...profile, ...reg.userProfile };
+                  localStorage.setItem('bm_user_profile', JSON.stringify(merged));
+              }
+          }
       } catch (e) {
           console.error('Google login decode error', e);
-          handleLogin();
+          setLoginError('Đăng nhập thất bại. Vui lòng thử lại.');
       }
   };
 
@@ -738,59 +753,71 @@ const App: React.FC = () => {
 
   const handleConfirmPayment = useCallback(async () => {
       if (!selectedPlan || !user) return;
+      setPaymentVerifyError(null);
       setIsVerifyingPayment(true);
       const now = Date.now();
       const durationMs = selectedPlan.durationMonths * 30 * 24 * 60 * 60 * 1000;
       const endDate = now + durationMs;
 
-      if (isApiConfigured()) {
-          const orderRes = await createPaymentOrder({
-              userId: user.email,
-              userEmail: user.email,
-              planId: selectedPlan.id,
-              amount: selectedPlan.price,
-              description: `BAOMINH ${user.email?.split('@')[0]} ${selectedPlan.id}`,
-          });
-          if (orderRes?.orderId) {
-              paymentPollCountRef.current = 0;
-              const poll = async () => {
-                  if (paymentPollCountRef.current >= PAYMENT_POLL_MAX) {
-                      setIsVerifyingPayment(false);
-                      return;
-                  }
-                  paymentPollCountRef.current += 1;
-                  const statusRes = await checkPaymentStatus(orderRes.orderId!);
-                  if (statusRes?.status === 'paid' && statusRes.startDate != null && statusRes.endDate != null) {
-                      applyPaymentSuccess(statusRes.startDate, statusRes.endDate);
-                      return;
-                  }
-                  if (statusRes?.status === 'paid') {
-                      applyPaymentSuccess(now, endDate);
-                      return;
-                  }
-                  setTimeout(poll, PAYMENT_POLL_INTERVAL_MS);
-              };
-              setTimeout(poll, PAYMENT_POLL_INTERVAL_MS);
-              return;
-          }
+      if (!isApiConfigured()) {
+          setIsVerifyingPayment(false);
+          setPaymentVerifyError('Chưa thể xác nhận thanh toán. Vui lòng cấu hình VITE_API_URL (backend) để xác thực qua SePay.');
+          return;
       }
 
-      // Không có API hoặc tạo đơn thất bại: mô phỏng chờ SePay (3s) rồi báo thành công
-      setTimeout(() => {
-          applyPaymentSuccess(now, endDate);
-      }, 3000);
+      const orderRes = await createPaymentOrder({
+          userId: user.email,
+          userEmail: user.email,
+          planId: selectedPlan.id,
+          amount: selectedPlan.price,
+          description: `BAOMINH ${user.email?.split('@')[0]} ${selectedPlan.id}`,
+      });
+
+      if (!orderRes?.orderId) {
+          setIsVerifyingPayment(false);
+          setPaymentVerifyError('Tạo đơn thanh toán thất bại. Vui lòng thử lại hoặc liên hệ Zalo ' + ZALO_PHONE);
+          return;
+      }
+
+      paymentPollCountRef.current = 0;
+      const poll = async () => {
+          if (paymentPollCountRef.current >= PAYMENT_POLL_MAX) {
+              setIsVerifyingPayment(false);
+              setPaymentVerifyError('Chưa nhận được xác nhận thanh toán từ ngân hàng. Nếu bạn đã chuyển khoản, vui lòng đợi vài phút hoặc liên hệ Zalo ' + ZALO_PHONE + ' để được hỗ trợ.');
+              return;
+          }
+          paymentPollCountRef.current += 1;
+          const statusRes = await checkPaymentStatus(orderRes.orderId);
+          if (statusRes?.status === 'paid' && statusRes.startDate != null && statusRes.endDate != null) {
+              applyPaymentSuccess(statusRes.startDate, statusRes.endDate);
+              return;
+          }
+          if (statusRes?.status === 'paid') {
+              applyPaymentSuccess(now, endDate);
+              return;
+          }
+          setTimeout(poll, PAYMENT_POLL_INTERVAL_MS);
+      };
+      setTimeout(poll, PAYMENT_POLL_INTERVAL_MS);
   }, [selectedPlan, user, applyPaymentSuccess]);
 
   const handleClosePaymentSuccess = () => {
       setPaymentSuccess(null);
+      setPaymentVerifyError(null);
       setShowPaywall(false);
   };
+
+  // Xóa thông báo lỗi thanh toán khi mở lại modal gia hạn
+  useEffect(() => {
+      if (showPaywall) setPaymentVerifyError(null);
+  }, [showPaywall]);
 
   const handleLogout = () => {
       triggerUISound('click');
       if (status === SessionStatus.CONNECTED) disconnectFromAI();
       setUser(null);
       localStorage.removeItem('bm_user_profile');
+      setLoginError(null);
       setShowLoginModal(true);
       setShowPaywall(false);
       setCart([]);
@@ -1831,6 +1858,17 @@ const App: React.FC = () => {
           </div>
 
           <div className="space-y-4">
+              <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest border-b border-white/5 pb-2">{t.zaloConsult}</h3>
+              <div className="flex flex-col items-center bg-gradient-to-r from-slate-800 to-slate-900 p-4 rounded-xl border border-white/10">
+                  <p className="text-[10px] text-slate-400 mb-3 text-center">{t.zaloConsultDesc}</p>
+                  <a href={`https://zalo.me/${ZALO_PHONE}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-2">
+                      <img src={ZALO_QR_URL} alt="Zalo QR" className="w-32 h-32 rounded-lg bg-white p-1" />
+                      <span className="text-sm font-bold text-emerald-400">{ZALO_PHONE}</span>
+                  </a>
+              </div>
+          </div>
+
+          <div className="space-y-4">
               <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest border-b border-white/5 pb-2">{t.apiConfig}</h3>
               <div className="flex gap-2">
                   <input type="password" value={newKeyInput} onChange={(e) => setNewKeyInput(e.target.value)} placeholder={t.enterApiKey} className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500 font-mono" />
@@ -1981,20 +2019,20 @@ const App: React.FC = () => {
                 <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500"></div>
                 <div className="w-16 h-16 bg-indigo-600 rounded-2xl mx-auto mb-6 flex items-center justify-center text-2xl font-black text-white shadow-lg shadow-indigo-500/50">BM</div>
                 <h2 className="text-2xl font-bold text-white mb-2">{t.loginTitle}</h2>
-                <p className="text-slate-400 text-sm mb-8">{t.loginDesc}</p>
+                <p className="text-slate-400 text-sm mb-6">{t.loginDesc}</p>
                 {googleClientId ? (
-                    <div className="w-full flex justify-center">
-                        <GoogleLogin
-                            onSuccess={handleGoogleLoginSuccess}
-                            onError={() => triggerUISound('click')}
-                            useOneTap={false}
-                        />
-                    </div>
+                    <>
+                        <div className="w-full flex justify-center">
+                            <GoogleLogin
+                                onSuccess={handleGoogleLoginSuccess}
+                                onError={() => { triggerUISound('click'); setLoginError('Đăng nhập thất bại. Vui lòng thử lại.'); }}
+                                useOneTap={false}
+                            />
+                        </div>
+                        {loginError && <p className="text-red-400 text-sm mt-4">{loginError}</p>}
+                    </>
                 ) : (
-                    <button onClick={handleLogin} className="w-full py-3 bg-white hover:bg-gray-100 text-slate-900 rounded-xl font-bold flex items-center justify-center gap-3 transition-all shadow-xl">
-                        <img src="https://www.svgrepo.com/show/475656/google-color.svg" className="w-5 h-5" alt="Google" />
-                        {t.btnLoginGoogle}
-                    </button>
+                    <p className="text-amber-400/90 text-sm">Cần cấu hình <code className="bg-slate-800 px-1 rounded">VITE_GOOGLE_CLIENT_ID</code> trong file <code className="bg-slate-800 px-1 rounded">.env</code> (hoặc .env.local) để đăng nhập bằng Google. Lấy Client ID tại Google Cloud Console → APIs & Services → Credentials.</p>
                 )}
                 <p className="text-[10px] text-slate-600 mt-6">Secure Login • 14-Day Trial Included</p>
             </div>
@@ -2047,10 +2085,17 @@ const App: React.FC = () => {
                                 </div>
                             ))}
                         </div>
+                        <div className="mt-6 pt-6 border-t border-slate-700 flex flex-wrap items-center justify-center gap-4">
+                            <span className="text-slate-400 text-xs">Cần tư vấn? Quét QR Zalo</span>
+                            <a href={`https://zalo.me/${ZALO_PHONE}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 bg-slate-800/80 hover:bg-slate-700 rounded-lg px-3 py-2 border border-slate-600">
+                                <img src={ZALO_QR_URL} alt="Zalo" className="w-10 h-10 rounded bg-white p-0.5" />
+                                <span className="font-bold text-emerald-400">{ZALO_PHONE}</span>
+                            </a>
+                        </div>
                     </>
                 ) : (
                     <div className="flex flex-col items-center animate-[fadeIn_0.3s_ease-out]">
-                        <button onClick={() => setSelectedPlan(null)} className="self-start text-slate-400 hover:text-white mb-4 flex items-center gap-2 text-xs font-bold uppercase">← {t.back}</button>
+                        <button onClick={() => { setSelectedPlan(null); setPaymentVerifyError(null); }} className="self-start text-slate-400 hover:text-white mb-4 flex items-center gap-2 text-xs font-bold uppercase">← {t.back}</button>
                         <h2 className="text-xl font-bold text-white mb-6 uppercase tracking-wide">{t.bankTransfer}</h2>
                         
                         <div className="bg-white p-4 rounded-xl mb-6 shadow-xl">
@@ -2073,8 +2118,11 @@ const App: React.FC = () => {
                             disabled={isVerifyingPayment}
                             className={`w-full max-w-xs py-3 rounded-xl font-bold uppercase tracking-widest text-xs transition-all ${isVerifyingPayment ? 'bg-slate-700 text-slate-500' : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-900/50'}`}
                         >
-                            {isVerifyingPayment ? (isApiConfigured() ? 'Đang chờ phản hồi từ SePay...' : t.checkingPayment) : t.iHavePaid}
+                            {isVerifyingPayment ? 'Đang kiểm tra từ SePay...' : t.iHavePaid}
                         </button>
+                        {paymentVerifyError && (
+                            <p className="mt-4 text-sm text-amber-400 bg-amber-900/20 border border-amber-500/50 rounded-lg px-4 py-3 text-center max-w-xs">{paymentVerifyError}</p>
+                        )}
                     </div>
                 )}
             </div>

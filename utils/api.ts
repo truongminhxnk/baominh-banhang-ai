@@ -121,6 +121,37 @@ export function isApiConfigured(): boolean {
   return !!getBaseUrl();
 }
 
+// --- Đăng ký / đồng bộ người dùng lên VPS (danh sách user để quản lý và gia hạn) ---
+
+export interface RegisterUserRequest {
+  email: string;
+  name: string;
+  trialStartDate?: number;
+}
+
+export interface RegisterUserResponse {
+  ok: boolean;
+  userProfile?: UserProfilePayload;
+  message?: string;
+}
+
+/** POST /api/users/register — Đăng ký hoặc cập nhật user khi đăng nhập Google. VPS lưu danh sách user để quản lý và gia hạn. */
+export async function registerUserOnServer(payload: RegisterUserRequest): Promise<RegisterUserResponse | null> {
+  const base = getBaseUrl();
+  if (!base) return null;
+  try {
+    const res = await fetch(`${base}/users/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as RegisterUserResponse;
+  } catch {
+    return null;
+  }
+}
+
 // --- Giới hạn 1 thiết bị cho tài khoản Premium ---
 
 export interface RegisterDeviceResponse {
