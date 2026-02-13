@@ -117,6 +117,32 @@ export async function checkPaymentStatus(orderId: string): Promise<PaymentStatus
   }
 }
 
+// --- Luồng baominh.ai.vn: webhook parse VT-{loginId}, backend cập nhật user; app poll check_payment theo loginId ---
+
+export interface CheckPaymentByLoginIdResponse {
+  found: boolean;
+  user?: {
+    expiryDate?: number;
+    planType?: string;
+    isPremium?: boolean;
+    premiumStartDate?: number;
+    [key: string]: unknown;
+  };
+}
+
+/** GET /api/check_payment/:loginId - Kiểm tra thanh toán theo loginId (backend kiểu baominh: webhook cập nhật user, app poll theo loginId) */
+export async function checkPaymentByLoginId(loginId: string): Promise<CheckPaymentByLoginIdResponse | null> {
+  const base = getBaseUrl();
+  if (!base) return null;
+  try {
+    const res = await fetch(`${base}/check_payment/${encodeURIComponent(loginId)}`);
+    if (!res.ok) return null;
+    return (await res.json()) as CheckPaymentByLoginIdResponse;
+  } catch {
+    return null;
+  }
+}
+
 export function isApiConfigured(): boolean {
   return !!getBaseUrl();
 }

@@ -6,7 +6,7 @@ import { jwtDecode } from 'jwt-decode';
 import { decode, encode, decodeAudioData, playUISound, blobToBase64 } from './utils/audioHelpers';
 import CameraView from './components/CameraView';
 import { SessionStatus, Transcription, Product, CartItem, Invoice, StockLog, Customer, PreOrder, UserProfile, PricingPlan } from './types';
-import { loadStoreData, saveStoreData, checkPaymentStatus, createPaymentOrder, isApiConfigured, registerDevice, checkSession, getOrCreateDeviceId, registerUserOnServer } from './utils/api';
+import { loadStoreData, saveStoreData, checkPaymentStatus, createPaymentOrder, isApiConfigured, registerDevice, checkSession, getOrCreateDeviceId, registerUserOnServer, checkPaymentByLoginId } from './utils/api';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 
@@ -501,6 +501,8 @@ const App: React.FC = () => {
   const [paymentSuccess, setPaymentSuccess] = useState<{ startDate: number; endDate: number } | null>(null);
   const [paymentVerifyError, setPaymentVerifyError] = useState<string | null>(null);
   const paymentPollCountRef = useRef(0);
+  const paymentCheckIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastCheckedExpiryRef = useRef<number>(0);
   const [kickedMessage, setKickedMessage] = useState<string | null>(null);
   const [deviceRegisteredRevoked, setDeviceRegisteredRevoked] = useState(false);
   const sessionCheckIntervalRef = useRef<number | null>(null);
@@ -754,13 +756,13 @@ const App: React.FC = () => {
       triggerUISound('success');
   }, [user]);
 
+  // loginId cho luồng thanh toán kiểu baominh: webhook parse VT-{loginId}, app poll GET /api/check_payment/:loginId
+  const paymentLoginId = user?.email ? user.email.replace('@', '.') : '';
+
   const handleConfirmPayment = useCallback(async () => {
       if (!selectedPlan || !user) return;
       setPaymentVerifyError(null);
       setIsVerifyingPayment(true);
-      const now = Date.now();
-      const durationMs = selectedPlan.durationMonths * 30 * 24 * 60 * 60 * 1000;
-      const endDate = now + durationMs;
 
       if (!isApiConfigured()) {
           setIsVerifyingPayment(false);
@@ -768,41 +770,35 @@ const App: React.FC = () => {
           return;
       }
 
-      const orderRes = await createPaymentOrder({
-          userId: user.email,
-          userEmail: user.email,
-          planId: selectedPlan.id,
-          amount: selectedPlan.price,
-          description: `BAOMINH ${user.email?.split('@')[0]} ${selectedPlan.id}`,
-      });
-
-      if (!orderRes?.orderId) {
+      // Luồng baominh: kiểm tra theo loginId (GET /api/check_payment/:loginId), không cần tạo đơn
+      const loginId = paymentLoginId || user.email?.replace('@', '.') || '';
+      if (!loginId) {
           setIsVerifyingPayment(false);
-          setPaymentVerifyError('Tạo đơn thanh toán thất bại. Vui lòng thử lại hoặc liên hệ Zalo ' + ZALO_PHONE);
+          setPaymentVerifyError('Không xác định được mã thanh toán.');
           return;
       }
 
-      paymentPollCountRef.current = 0;
-      const poll = async () => {
-          if (paymentPollCountRef.current >= PAYMENT_POLL_MAX) {
-              setIsVerifyingPayment(false);
-              setPaymentVerifyError('Chưa nhận được xác nhận thanh toán từ ngân hàng. Nếu bạn đã chuyển khoản, vui lòng đợi vài phút hoặc liên hệ Zalo ' + ZALO_PHONE + ' để được hỗ trợ.');
-              return;
+      const doCheck = async (): Promise<boolean> => {
+          const data = await checkPaymentByLoginId(loginId);
+          if (!data?.found || !data.user?.expiryDate) return false;
+          const newExpiry = data.user.expiryDate;
+          const prevExpiry = lastCheckedExpiryRef.current || user?.expiryDate || 0;
+          const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+          if (newExpiry > 0 && (prevExpiry === 0 || (newExpiry - prevExpiry) >= ONE_DAY_MS)) {
+              const startDate = data.user.premiumStartDate || Date.now();
+              applyPaymentSuccess(startDate, newExpiry);
+              return true;
           }
-          paymentPollCountRef.current += 1;
-          const statusRes = await checkPaymentStatus(orderRes.orderId);
-          if (statusRes?.status === 'paid' && statusRes.startDate != null && statusRes.endDate != null) {
-              applyPaymentSuccess(statusRes.startDate, statusRes.endDate);
-              return;
-          }
-          if (statusRes?.status === 'paid') {
-              applyPaymentSuccess(now, endDate);
-              return;
-          }
-          setTimeout(poll, PAYMENT_POLL_INTERVAL_MS);
+          return false;
       };
-      setTimeout(poll, PAYMENT_POLL_INTERVAL_MS);
-  }, [selectedPlan, user, applyPaymentSuccess]);
+
+      const success = await doCheck();
+      if (success) {
+          setIsVerifyingPayment(false);
+          return;
+      }
+      // Polling đã chạy từ useEffect khi chọn gói; giữ isVerifyingPayment true đến khi phát hiện thành công hoặc đóng modal
+  }, [selectedPlan, user, paymentLoginId, applyPaymentSuccess]);
 
   const handleClosePaymentSuccess = () => {
       setPaymentSuccess(null);
@@ -814,6 +810,50 @@ const App: React.FC = () => {
   useEffect(() => {
       if (showPaywall) setPaymentVerifyError(null);
   }, [showPaywall]);
+
+  // Luồng baominh: khi đã chọn gói và có API, tự động polling GET /api/check_payment/:loginId mỗi 5s; phát hiện expiryDate tăng thì báo thành công
+  useEffect(() => {
+      if (!selectedPlan || !user?.email || !isApiConfigured()) return;
+      const loginId = user.email.replace('@', '.');
+      lastCheckedExpiryRef.current = user.expiryDate || user.trialStartDate || 0;
+      setIsVerifyingPayment(true);
+
+      const PAYMENT_POLL_INTERVAL_MS = 5000;
+      const PAYMENT_POLL_MAX_MINUTES = 10;
+      const interval = setInterval(async () => {
+          const data = await checkPaymentByLoginId(loginId);
+          if (!data?.found || !data.user?.expiryDate) return;
+          const newExpiry = data.user.expiryDate;
+          const prev = lastCheckedExpiryRef.current;
+          const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+          if (newExpiry > 0 && (prev === 0 || (newExpiry - prev) >= ONE_DAY_MS)) {
+              if (paymentCheckIntervalRef.current) {
+                  clearInterval(paymentCheckIntervalRef.current);
+                  paymentCheckIntervalRef.current = null;
+              }
+              setIsVerifyingPayment(false);
+              const startDate = data.user.premiumStartDate ?? Date.now();
+              applyPaymentSuccess(startDate, newExpiry);
+          }
+      }, PAYMENT_POLL_INTERVAL_MS);
+      paymentCheckIntervalRef.current = interval;
+
+      const timeout = setTimeout(() => {
+          if (paymentCheckIntervalRef.current === interval) {
+              clearInterval(interval);
+              paymentCheckIntervalRef.current = null;
+              setIsVerifyingPayment(false);
+              setPaymentVerifyError('Chưa nhận được xác nhận thanh toán. Nếu bạn đã chuyển khoản, vui lòng đợi thêm hoặc liên hệ Zalo ' + ZALO_PHONE);
+          }
+      }, PAYMENT_POLL_MAX_MINUTES * 60 * 1000);
+
+      return () => {
+          clearInterval(interval);
+          clearTimeout(timeout);
+          if (paymentCheckIntervalRef.current === interval) paymentCheckIntervalRef.current = null;
+          setIsVerifyingPayment(false);
+      };
+  }, [selectedPlan, user?.email, user?.expiryDate, user?.trialStartDate, applyPaymentSuccess]);
 
   const handleLogout = () => {
       triggerUISound('click');
@@ -2130,13 +2170,14 @@ const App: React.FC = () => {
                         <h2 className="text-xl font-bold text-white mb-6 uppercase tracking-wide">{t.bankTransfer}</h2>
                         
                         <div className="bg-white p-4 rounded-xl mb-6 shadow-xl">
-                            {/* SEPAY QR CODE */}
+                            {/* SEPAY QR — Nội dung chuyển khoản: VT-{loginId} để webhook backend nhận diện (luồng baominh) */}
                             <img 
-                                src={getSePayQrUrl(selectedPlan.price, `BAOMINH ${user?.email?.split('@')[0]} ${selectedPlan.id}`)} 
+                                src={getSePayQrUrl(selectedPlan.price, `VT-${paymentLoginId}`)} 
                                 alt="SePay QR" 
                                 className="w-64 h-64 object-contain"
                             />
                         </div>
+                        <p className="text-[10px] text-slate-500 mb-2">Nội dung chuyển khoản: <span className="font-mono text-amber-400">VT-{paymentLoginId}</span> (ghi đúng để hệ thống xác nhận)</p>
                         
                         <div className="text-center space-y-2 mb-8">
                             <p className="text-sm text-slate-300">Gói: <span className="font-bold text-white">{selectedPlan.name}</span></p>
