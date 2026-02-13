@@ -1,9 +1,12 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality, Type, FunctionDeclaration, Tool } from '@google/genai';
+import { GoogleLogin } from '@react-oauth/google';
+import { jwtDecode } from 'jwt-decode';
 import { decode, encode, decodeAudioData, playUISound, blobToBase64 } from './utils/audioHelpers';
 import CameraView from './components/CameraView';
 import { SessionStatus, Transcription, Product, CartItem, Invoice, StockLog, Customer, PreOrder, UserProfile, PricingPlan } from './types';
+import { loadStoreData, saveStoreData, checkPaymentStatus, createPaymentOrder, isApiConfigured, registerDevice, checkSession, getOrCreateDeviceId } from './utils/api';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 
@@ -404,6 +407,9 @@ const INITIAL_INVENTORY: Product[] = [
   { id: 'SP005', barcode: '8930005', name: 'Sạc dự phòng Anker', price: 890000, quantity: 20, unit: 'cục', category: 'Phụ kiện' },
 ];
 
+const PAYMENT_POLL_INTERVAL_MS = 3000;
+const PAYMENT_POLL_MAX = 60;
+
 const SILENT_AUDIO_URI = 'data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMD//////////////////////////////////////////////////////////////////wAAAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAASAA82xhAAAAAAA//OEZAAAAAAIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//OEZAAAAAAIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//OEZAAAAAAIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//OEZAAAAAAIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq';
 const PROACTIVE_SILENCE_TIMEOUT = 4000;
 
@@ -432,6 +438,30 @@ function downsampleTo16k(buffer: Float32Array, sampleRate: number): Int16Array {
   return res;
 }
 
+// --- Đa tài khoản: mỗi user có dữ liệu riêng (localStorage + API) ---
+function getStoredUser(): UserProfile | null {
+  try {
+    const s = localStorage.getItem('bm_user_profile');
+    return s ? JSON.parse(s) : null;
+  } catch {
+    return null;
+  }
+}
+function getStorageKey(prefix: string, userEmail?: string | null): string {
+  const email = userEmail ?? getStoredUser()?.email;
+  if (email) return `${prefix}_${encodeURIComponent(email)}`;
+  return prefix;
+}
+function readLocal<T>(key: string, fallback: T, parse: (s: string) => T): T {
+  const raw = localStorage.getItem(key);
+  if (!raw) return fallback;
+  try {
+    return parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
 const App: React.FC = () => {
   // --- AUTH & SUBSCRIPTION STATE ---
   const [user, setUser] = useState<UserProfile | null>(() => {
@@ -448,39 +478,44 @@ const App: React.FC = () => {
   // Payment Modal State
   const [selectedPlan, setSelectedPlan] = useState<PricingPlan | null>(null);
   const [isVerifyingPayment, setIsVerifyingPayment] = useState(false);
+  const [paymentSuccess, setPaymentSuccess] = useState<{ startDate: number; endDate: number } | null>(null);
+  const paymentPollCountRef = useRef(0);
+  const [kickedMessage, setKickedMessage] = useState<string | null>(null);
+  const [deviceRegisteredRevoked, setDeviceRegisteredRevoked] = useState(false);
+  const sessionCheckIntervalRef = useRef<number | null>(null);
 
   // --- STATE QUẢN LÝ ---
-  const [keyPool, setKeyPool] = useState<string[]>(() => { const saved = localStorage.getItem('gemini_key_pool'); return saved ? JSON.parse(saved) : []; });
+  const [keyPool, setKeyPool] = useState<string[]>(() => readLocal(getStorageKey('gemini_key_pool'), [], (s) => JSON.parse(s)) || readLocal('gemini_key_pool', [], (s) => JSON.parse(s)));
   const [newKeyInput, setNewKeyInput] = useState('');
   const [activeKeyIndex, setActiveKeyIndex] = useState(0);
 
   // --- STORE BRANDING ---
-  const [storeName, setStoreName] = useState<string>(() => localStorage.getItem('gemini_store_name') || 'Bảo Minh AI');
-  const [storeWebsite, setStoreWebsite] = useState<string>(() => localStorage.getItem('gemini_store_website') || 'baominh.io.vn');
-  const [storeHotline, setStoreHotline] = useState<string>(() => localStorage.getItem('gemini_store_hotline') || '0986234983');
-  const [storeAddress, setStoreAddress] = useState<string>(() => localStorage.getItem('gemini_store_address') || 'Hà Nội');
+  const [storeName, setStoreName] = useState<string>(() => localStorage.getItem(getStorageKey('gemini_store_name')) || localStorage.getItem('gemini_store_name') || 'Bảo Minh AI');
+  const [storeWebsite, setStoreWebsite] = useState<string>(() => localStorage.getItem(getStorageKey('gemini_store_website')) || localStorage.getItem('gemini_store_website') || 'baominh.io.vn');
+  const [storeHotline, setStoreHotline] = useState<string>(() => localStorage.getItem(getStorageKey('gemini_store_hotline')) || localStorage.getItem('gemini_store_hotline') || '0986234983');
+  const [storeAddress, setStoreAddress] = useState<string>(() => localStorage.getItem(getStorageKey('gemini_store_address')) || localStorage.getItem('gemini_store_address') || 'Hà Nội');
   
-  const [language, setLanguage] = useState<'vi' | 'en' | 'zh' | 'ja' | 'ko'>(() => (localStorage.getItem('gemini_lang') as any) || 'vi');
+  const [language, setLanguage] = useState<'vi' | 'en' | 'zh' | 'ja' | 'ko'>(() => (localStorage.getItem(getStorageKey('gemini_lang')) || localStorage.getItem('gemini_lang') || 'vi') as any);
   const t = TRANSLATIONS[language]; 
 
   // State Kho & POS
-  const [inventory, setInventory] = useState<Product[]>(() => { const saved = localStorage.getItem('gemini_inventory'); return saved ? JSON.parse(saved) : INITIAL_INVENTORY; });
+  const [inventory, setInventory] = useState<Product[]>(() => readLocal(getStorageKey('gemini_inventory'), INITIAL_INVENTORY, (s) => JSON.parse(s)) || readLocal('gemini_inventory', INITIAL_INVENTORY, (s) => JSON.parse(s)) || INITIAL_INVENTORY);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [currentInvoice, setCurrentInvoice] = useState<Invoice | null>(null);
-  const [stockLogs, setStockLogs] = useState<StockLog[]>([]); 
+  const [stockLogs, setStockLogs] = useState<StockLog[]>(() => readLocal(getStorageKey('gemini_stock_logs'), [], (s) => JSON.parse(s))); 
   const [isCheckoutModalOpen, setIsCheckoutModalOpen] = useState(false);
   const [checkoutForm, setCheckoutForm] = useState({ name: '', phone: '', address: '' });
 
   // State CRM
-  const [customers, setCustomers] = useState<Customer[]>(() => { const saved = localStorage.getItem('gemini_customers'); return saved ? JSON.parse(saved) : []; });
-  const [preOrders, setPreOrders] = useState<PreOrder[]>(() => { const saved = localStorage.getItem('gemini_preorders'); return saved ? JSON.parse(saved) : []; });
+  const [customers, setCustomers] = useState<Customer[]>(() => readLocal(getStorageKey('gemini_customers'), [], (s) => JSON.parse(s)) || readLocal('gemini_customers', [], (s) => JSON.parse(s)));
+  const [preOrders, setPreOrders] = useState<PreOrder[]>(() => readLocal(getStorageKey('gemini_preorders'), [], (s) => JSON.parse(s)) || readLocal('gemini_preorders', [], (s) => JSON.parse(s)));
   const [crmSearch, setCrmSearch] = useState('');
   const [userRole, setUserRole] = useState<'STAFF' | 'CUSTOMER'>('CUSTOMER');
 
   // UI States
-  const [storeDocs, setStoreDocs] = useState<string>(() => localStorage.getItem('gemini_store_docs') || '');
-  const [esp32Ip, setEsp32Ip] = useState<string>(() => localStorage.getItem('gemini_esp32_ip') || '');
-  const [uiAudio, setUiAudio] = useState<UIAudioSettings>(() => { const saved = localStorage.getItem('gemini_ui_audio'); return saved ? JSON.parse(saved) : { enabled: true, profile: 'default', volume: 0.5 }; });
+  const [storeDocs, setStoreDocs] = useState<string>(() => localStorage.getItem(getStorageKey('gemini_store_docs')) || localStorage.getItem('gemini_store_docs') || '');
+  const [esp32Ip, setEsp32Ip] = useState<string>(() => localStorage.getItem(getStorageKey('gemini_esp32_ip')) || localStorage.getItem('gemini_esp32_ip') || '');
+  const [uiAudio, setUiAudio] = useState<UIAudioSettings>(() => readLocal(getStorageKey('gemini_ui_audio'), { enabled: true, profile: 'default', volume: 0.5 }, (s) => JSON.parse(s)) || readLocal('gemini_ui_audio', { enabled: true, profile: 'default', volume: 0.5 }, (s) => JSON.parse(s)));
   const [isUserSpeaking, setIsUserSpeaking] = useState(false);
   const [isAISpeaking, setIsAISpeaking] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<'chat' | 'inventory' | 'crm' | 'settings' | 'logs'>('chat');
@@ -488,16 +523,16 @@ const App: React.FC = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false); 
   const [status, setStatus] = useState<SessionStatus>(SessionStatus.IDLE);
   const [isStandby, setIsStandby] = useState(false); 
-  const [transcriptions, setTranscriptions] = useState<Transcription[]>(() => { const saved = localStorage.getItem('gemini_chat_history'); try { return saved ? JSON.parse(saved) : []; } catch(e) { return []; } });
+  const [transcriptions, setTranscriptions] = useState<Transcription[]>(() => { try { return readLocal(getStorageKey('gemini_chat_history'), [], (s) => JSON.parse(s)) || readLocal('gemini_chat_history', [], (s) => JSON.parse(s)); } catch { return []; } });
   const [isMuted, setIsMuted] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [logs, setLogs] = useState<DebugLog[]>([]);
   const [permissionError, setPermissionError] = useState<string | null>(null);
   const [showCameraPreview, setShowCameraPreview] = useState(true);
   const [scannedProduct, setScannedProduct] = useState<Product | null>(null);
-  const [isVoiceOnly, setIsVoiceOnly] = useState<boolean>(() => localStorage.getItem('gemini_voice_only') === 'true');
-  const [isSensorMode, setIsSensorMode] = useState<boolean>(() => localStorage.getItem('gemini_sensor_mode') === 'true');
-  const [useRemoteMic, setUseRemoteMic] = useState<boolean>(() => localStorage.getItem('gemini_remote_mic') === 'true');
+  const [isVoiceOnly, setIsVoiceOnly] = useState<boolean>(() => (localStorage.getItem(getStorageKey('gemini_voice_only')) || localStorage.getItem('gemini_voice_only')) === 'true');
+  const [isSensorMode, setIsSensorMode] = useState<boolean>(() => (localStorage.getItem(getStorageKey('gemini_sensor_mode')) || localStorage.getItem('gemini_sensor_mode')) === 'true');
+  const [useRemoteMic, setUseRemoteMic] = useState<boolean>(() => (localStorage.getItem(getStorageKey('gemini_remote_mic')) || localStorage.getItem('gemini_remote_mic')) === 'true');
   const [motionDetected, setMotionDetected] = useState(false);
   const [inventoryText, setInventoryText] = useState('');
   const [camCheckStatus, setCamCheckStatus] = useState<'idle' | 'success' | 'error'>('idle');
@@ -526,6 +561,7 @@ const App: React.FC = () => {
   const intentionalDisconnectRef = useRef<boolean>(false);
   const retryCountRef = useRef<number>(0);
   const silenceTimerRef = useRef<number | null>(null);
+  const saveStoreTimeoutRef = useRef<number | null>(null);
   const sensorIntervalRef = useRef<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const usageTimerRef = useRef<number | null>(null);
@@ -603,9 +639,9 @@ const App: React.FC = () => {
         return { blocked: true, reason: t.trialExpired };
     }
 
-    // Check Daily Limit (30 mins by IP)
+    // Check Daily Limit (30 phút / tài khoản)
     const todayStr = new Date().toISOString().slice(0, 10);
-    const usageKey = `bm_usage_${todayStr}_${clientIp}`;
+    const usageKey = `bm_usage_${todayStr}_${user?.email || clientIp}`;
     const used = parseInt(localStorage.getItem(usageKey) || '0');
     setDailyMinutesUsed(used);
 
@@ -621,7 +657,7 @@ const App: React.FC = () => {
     if (status === SessionStatus.CONNECTED && user && !user.isPremium && clientIp) {
         usageTimerRef.current = window.setInterval(() => {
             const todayStr = new Date().toISOString().slice(0, 10);
-            const usageKey = `bm_usage_${todayStr}_${clientIp}`;
+            const usageKey = `bm_usage_${todayStr}_${user?.email || clientIp}`;
             const current = parseInt(localStorage.getItem(usageKey) || '0');
             const updated = current + 1;
             localStorage.setItem(usageKey, updated.toString());
@@ -650,9 +686,11 @@ const App: React.FC = () => {
       }
   }, [checkLimits, dailyMinutesUsed]);
 
+  const googleClientId = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID as string | undefined;
+
   // --- HANDLERS FOR AUTH & PAYMENT ---
   const handleLogin = () => {
-      // Simulate Google Login
+      // Mock login khi chưa cấu hình Google Client ID
       triggerUISound('click');
       const mockUser: UserProfile = {
           email: 'demo@baominh.ai',
@@ -666,67 +704,244 @@ const App: React.FC = () => {
       triggerUISound('success');
   };
 
-  const handleSimulatePayment = () => {
+  const handleGoogleLoginSuccess = (credentialResponse: { credential?: string }) => {
+      if (!credentialResponse.credential) return;
+      try {
+          const decoded = jwtDecode<{ email?: string; name?: string }>(credentialResponse.credential);
+          const profile: UserProfile = {
+              email: decoded.email || 'user@gmail.com',
+              name: decoded.name || 'User',
+              trialStartDate: Date.now(),
+              isPremium: false
+          };
+          setUser(profile);
+          localStorage.setItem('bm_user_profile', JSON.stringify(profile));
+          setShowLoginModal(false);
+          triggerUISound('success');
+      } catch (e) {
+          console.error('Google login decode error', e);
+          handleLogin();
+      }
+  };
+
+  const applyPaymentSuccess = useCallback((startDate: number, endDate: number) => {
+      if (!user) return;
+      const updatedUser = { ...user, isPremium: true, premiumStartDate: startDate, expiryDate: endDate };
+      setUser(updatedUser);
+      localStorage.setItem('bm_user_profile', JSON.stringify(updatedUser));
+      setPaymentSuccess({ startDate, endDate });
+      setIsForcedLock(false);
+      setSelectedPlan(null);
+      setIsVerifyingPayment(false);
+      triggerUISound('success');
+  }, [user]);
+
+  const handleConfirmPayment = useCallback(async () => {
       if (!selectedPlan || !user) return;
       setIsVerifyingPayment(true);
-      
-      // Simulate SePay Verification Delay
+      const now = Date.now();
+      const durationMs = selectedPlan.durationMonths * 30 * 24 * 60 * 60 * 1000;
+      const endDate = now + durationMs;
+
+      if (isApiConfigured()) {
+          const orderRes = await createPaymentOrder({
+              userId: user.email,
+              userEmail: user.email,
+              planId: selectedPlan.id,
+              amount: selectedPlan.price,
+              description: `BAOMINH ${user.email?.split('@')[0]} ${selectedPlan.id}`,
+          });
+          if (orderRes?.orderId) {
+              paymentPollCountRef.current = 0;
+              const poll = async () => {
+                  if (paymentPollCountRef.current >= PAYMENT_POLL_MAX) {
+                      setIsVerifyingPayment(false);
+                      return;
+                  }
+                  paymentPollCountRef.current += 1;
+                  const statusRes = await checkPaymentStatus(orderRes.orderId!);
+                  if (statusRes?.status === 'paid' && statusRes.startDate != null && statusRes.endDate != null) {
+                      applyPaymentSuccess(statusRes.startDate, statusRes.endDate);
+                      return;
+                  }
+                  if (statusRes?.status === 'paid') {
+                      applyPaymentSuccess(now, endDate);
+                      return;
+                  }
+                  setTimeout(poll, PAYMENT_POLL_INTERVAL_MS);
+              };
+              setTimeout(poll, PAYMENT_POLL_INTERVAL_MS);
+              return;
+          }
+      }
+
+      // Không có API hoặc tạo đơn thất bại: mô phỏng chờ SePay (3s) rồi báo thành công
       setTimeout(() => {
-          setIsVerifyingPayment(false);
-          const now = Date.now();
-          const durationMs = selectedPlan.durationMonths * 30 * 24 * 60 * 60 * 1000;
-          const expiryDate = now + durationMs;
-          
-          const updatedUser = { 
-              ...user, 
-              isPremium: true, 
-              expiryDate: expiryDate 
-          };
-          
-          setUser(updatedUser);
-          localStorage.setItem('bm_user_profile', JSON.stringify(updatedUser));
-          
-          setShowPaywall(false);
-          setIsForcedLock(false);
-          setSelectedPlan(null);
-          triggerUISound('success');
-          
-          const startStr = new Date(now).toLocaleDateString();
-          const endStr = new Date(expiryDate).toLocaleDateString();
-          alert(t.paymentSuccessDetail.replace('{start}', startStr).replace('{end}', endStr));
-      }, 2000);
+          applyPaymentSuccess(now, endDate);
+      }, 3000);
+  }, [selectedPlan, user, applyPaymentSuccess]);
+
+  const handleClosePaymentSuccess = () => {
+      setPaymentSuccess(null);
+      setShowPaywall(false);
+  };
+
+  const handleLogout = () => {
+      triggerUISound('click');
+      if (status === SessionStatus.CONNECTED) disconnectFromAI();
+      setUser(null);
+      localStorage.removeItem('bm_user_profile');
+      setShowLoginModal(true);
+      setShowPaywall(false);
+      setCart([]);
+      setCurrentInvoice(null);
+      setPaymentSuccess(null);
+      addLog('Đã đăng xuất.', 'info');
   };
 
   const getSePayQrUrl = (amount: number, content: string) => {
       return `https://qr.sepay.vn/img?bank=${SEPAY_BANK_NAME}&acc=${SEPAY_BANK_ACC}&template=${SEPAY_TEMPLATE}&amount=${amount}&des=${encodeURIComponent(content)}`;
   };
 
-  // --- EFFECT (EXISTING) ---
+  // --- EFFECT: Lưu dữ liệu theo từng tài khoản (localStorage key có suffix email) ---
   useEffect(() => {
-    localStorage.setItem('gemini_key_pool', JSON.stringify(keyPool));
-    localStorage.setItem('gemini_inventory', JSON.stringify(inventory));
-    localStorage.setItem('gemini_customers', JSON.stringify(customers));
-    localStorage.setItem('gemini_preorders', JSON.stringify(preOrders));
-    localStorage.setItem('gemini_store_docs', storeDocs);
-    localStorage.setItem('gemini_ui_audio', JSON.stringify(uiAudio));
-    localStorage.setItem('gemini_esp32_ip', esp32Ip);
-    localStorage.setItem('gemini_voice_only', String(isVoiceOnly));
-    localStorage.setItem('gemini_sensor_mode', String(isSensorMode));
-    localStorage.setItem('gemini_remote_mic', String(useRemoteMic));
-    localStorage.setItem('gemini_store_name', storeName);
-    localStorage.setItem('gemini_store_website', storeWebsite);
-    localStorage.setItem('gemini_store_hotline', storeHotline);
-    localStorage.setItem('gemini_store_address', storeAddress);
-    localStorage.setItem('gemini_lang', language);
-    
+    if (!user?.email) return; // Chỉ lưu khi đã đăng nhập
+    const k = (prefix: string) => getStorageKey(prefix, user.email);
+    localStorage.setItem(k('gemini_key_pool'), JSON.stringify(keyPool));
+    localStorage.setItem(k('gemini_inventory'), JSON.stringify(inventory));
+    localStorage.setItem(k('gemini_customers'), JSON.stringify(customers));
+    localStorage.setItem(k('gemini_preorders'), JSON.stringify(preOrders));
+    localStorage.setItem(k('gemini_stock_logs'), JSON.stringify(stockLogs));
+    localStorage.setItem(k('gemini_store_docs'), storeDocs);
+    localStorage.setItem(k('gemini_ui_audio'), JSON.stringify(uiAudio));
+    localStorage.setItem(k('gemini_esp32_ip'), esp32Ip);
+    localStorage.setItem(k('gemini_voice_only'), String(isVoiceOnly));
+    localStorage.setItem(k('gemini_sensor_mode'), String(isSensorMode));
+    localStorage.setItem(k('gemini_remote_mic'), String(useRemoteMic));
+    localStorage.setItem(k('gemini_store_name'), storeName);
+    localStorage.setItem(k('gemini_store_website'), storeWebsite);
+    localStorage.setItem(k('gemini_store_hotline'), storeHotline);
+    localStorage.setItem(k('gemini_store_address'), storeAddress);
+    localStorage.setItem(k('gemini_lang'), language);
     if (transcriptions.length > 0) {
-        localStorage.setItem('gemini_chat_history', JSON.stringify(transcriptions.slice(-50)));
-        localStorage.setItem('gemini_last_active_ts', String(Date.now()));
+      localStorage.setItem(k('gemini_chat_history'), JSON.stringify(transcriptions.slice(-50)));
+      localStorage.setItem(k('gemini_last_active_ts'), String(Date.now()));
     }
-
-    inventoryRef.current = inventory; 
+    inventoryRef.current = inventory;
     customersRef.current = customers;
-  }, [keyPool, inventory, storeDocs, uiAudio, esp32Ip, isVoiceOnly, isSensorMode, useRemoteMic, customers, preOrders, storeName, transcriptions, storeWebsite, storeHotline, storeAddress, language]);
+  }, [user?.email, keyPool, inventory, storeDocs, uiAudio, esp32Ip, isVoiceOnly, isSensorMode, useRemoteMic, customers, preOrders, stockLogs, storeName, transcriptions, storeWebsite, storeHotline, storeAddress, language]);
+
+  // Khi đổi tài khoản: load dữ liệu của user đó từ localStorage (tài khoản mới không có data thì dùng mặc định)
+  useEffect(() => {
+    if (!user?.email) return;
+    const k = (p: string) => getStorageKey(p, user.email);
+    const rawInv = localStorage.getItem(k('gemini_inventory')); setInventory(rawInv ? (() => { try { return JSON.parse(rawInv); } catch { return INITIAL_INVENTORY; } })() : INITIAL_INVENTORY);
+    const rawCust = localStorage.getItem(k('gemini_customers')); setCustomers(rawCust ? (() => { try { return JSON.parse(rawCust); } catch { return []; } })() : []);
+    const rawPO = localStorage.getItem(k('gemini_preorders')); setPreOrders(rawPO ? (() => { try { return JSON.parse(rawPO); } catch { return []; } })() : []);
+    const rawLogs = localStorage.getItem(k('gemini_stock_logs')); setStockLogs(rawLogs ? (() => { try { return JSON.parse(rawLogs); } catch { return []; } })() : []);
+    const name = localStorage.getItem(k('gemini_store_name')); setStoreName(name || 'Bảo Minh AI');
+    const web = localStorage.getItem(k('gemini_store_website')); setStoreWebsite(web || 'baominh.io.vn');
+    const hot = localStorage.getItem(k('gemini_store_hotline')); setStoreHotline(hot || '0986234983');
+    const addr = localStorage.getItem(k('gemini_store_address')); setStoreAddress(addr || 'Hà Nội');
+    const docs = localStorage.getItem(k('gemini_store_docs')); setStoreDocs(docs || '');
+    const lang = localStorage.getItem(k('gemini_lang')); setLanguage((lang as 'vi' | 'en') || 'vi');
+    const keyP = localStorage.getItem(k('gemini_key_pool')); setKeyPool(keyP ? (() => { try { return JSON.parse(keyP); } catch { return []; } })() : []);
+    const ui = localStorage.getItem(k('gemini_ui_audio')); setUiAudio(ui ? (() => { try { return JSON.parse(ui); } catch { return { enabled: true, profile: 'default', volume: 0.5 }; } })() : { enabled: true, profile: 'default', volume: 0.5 });
+    const ip = localStorage.getItem(k('gemini_esp32_ip')); setEsp32Ip(ip || '');
+    const voice = localStorage.getItem(k('gemini_voice_only')); setIsVoiceOnly(voice === 'true');
+    const sensor = localStorage.getItem(k('gemini_sensor_mode')); setIsSensorMode(sensor === 'true');
+    const mic = localStorage.getItem(k('gemini_remote_mic')); setUseRemoteMic(mic === 'true');
+    const chat = localStorage.getItem(k('gemini_chat_history')); setTranscriptions(chat ? (() => { try { return JSON.parse(chat); } catch { return []; } })() : []);
+  }, [user?.email]);
+
+  // Load store data từ VPS khi đã đăng nhập và cấu hình API (ghi đè lên localStorage, đồng bộ gói đăng ký)
+  useEffect(() => {
+    if (!user?.email || !isApiConfigured()) return;
+    loadStoreData(user.email).then((data) => {
+      if (!data) return;
+      if (data.userProfile) setUser((prev) => (prev ? { ...prev, ...data!.userProfile } : prev));
+      if (data.inventory && data.inventory.length > 0) setInventory(data.inventory);
+      if (data.customers && data.customers.length > 0) setCustomers(data.customers);
+      if (data.preOrders && data.preOrders.length > 0) setPreOrders(data.preOrders);
+      if (data.stockLogs && data.stockLogs.length > 0) setStockLogs(data.stockLogs);
+      if (data.storeName) setStoreName(data.storeName);
+      if (data.storeWebsite != null) setStoreWebsite(data.storeWebsite);
+      if (data.storeHotline != null) setStoreHotline(data.storeHotline);
+      if (data.storeAddress != null) setStoreAddress(data.storeAddress);
+      if (data.storeDocs != null) setStoreDocs(data.storeDocs);
+      if (data.language) setLanguage(data.language as 'vi' | 'en');
+      if (data.keyPool && data.keyPool.length > 0) setKeyPool(data.keyPool);
+    });
+  }, [user?.email]);
+
+  // Giới hạn Premium: 1 thiết bị — đăng ký thiết bị + kiểm tra phiên định kỳ, đăng xuất thiết bị cũ khi đăng nhập thiết bị mới
+  useEffect(() => {
+    if (!user?.email || !user?.isPremium || !isApiConfigured()) {
+      if (sessionCheckIntervalRef.current) {
+        clearInterval(sessionCheckIntervalRef.current);
+        sessionCheckIntervalRef.current = null;
+      }
+      return;
+    }
+    const deviceId = getOrCreateDeviceId();
+    registerDevice(user.email, deviceId).then((res) => {
+      if (res?.previousDeviceRevoked) setDeviceRegisteredRevoked(true);
+    });
+    sessionCheckIntervalRef.current = window.setInterval(async () => {
+      const session = await checkSession(user.email, deviceId);
+      if (session && !session.valid) {
+        if (sessionCheckIntervalRef.current) {
+          clearInterval(sessionCheckIntervalRef.current);
+          sessionCheckIntervalRef.current = null;
+        }
+        setKickedMessage('Tài khoản đã đăng nhập trên thiết bị khác. Bạn đã bị đăng xuất.');
+        if (status === SessionStatus.CONNECTED) {
+          if (activeSessionRef.current) { try { activeSessionRef.current.close(); } catch {} }
+          activeSessionRef.current = null;
+          setStatus(SessionStatus.IDLE);
+          setIsUserSpeaking(false);
+          setIsAISpeaking(false);
+        }
+        setUser(null);
+        localStorage.removeItem('bm_user_profile');
+        setShowLoginModal(true);
+        setShowPaywall(false);
+        setCart([]);
+        setPaymentSuccess(null);
+      }
+    }, 45000);
+    return () => {
+      if (sessionCheckIntervalRef.current) {
+        clearInterval(sessionCheckIntervalRef.current);
+        sessionCheckIntervalRef.current = null;
+      }
+    };
+  }, [user?.email, user?.isPremium, status]);
+
+  // Đồng bộ dữ liệu cửa hàng lên VPS (debounce 2s)
+  useEffect(() => {
+    if (!user?.email || !isApiConfigured()) return;
+    if (saveStoreTimeoutRef.current) clearTimeout(saveStoreTimeoutRef.current);
+    saveStoreTimeoutRef.current = window.setTimeout(() => {
+      saveStoreData({
+        userId: user.email,
+        storeName,
+        storeWebsite,
+        storeHotline,
+        storeAddress,
+        storeDocs,
+        inventory,
+        customers,
+        preOrders,
+        stockLogs,
+        keyPool,
+        language,
+      }).then(() => { saveStoreTimeoutRef.current = null; });
+    }, 2000);
+    return () => {
+      if (saveStoreTimeoutRef.current) clearTimeout(saveStoreTimeoutRef.current);
+    };
+  }, [user?.email, storeName, storeWebsite, storeHotline, storeAddress, storeDocs, inventory, customers, preOrders, stockLogs, keyPool, language]);
 
   useEffect(() => {
       const text = inventory.map(p => `${p.name} | ${p.price} | ${p.quantity}`).join('\n');
@@ -1139,11 +1354,10 @@ const App: React.FC = () => {
     checkoutPhaseRef.current = 'idle';
     
     setTranscriptions([]);
-    localStorage.removeItem('gemini_chat_history');
-    localStorage.removeItem('gemini_last_active_ts');
-    
+    localStorage.removeItem(getStorageKey('gemini_chat_history', user?.email));
+    localStorage.removeItem(getStorageKey('gemini_last_active_ts', user?.email));
     addLog(t.logs.disconnected, 'info');
-  }, [triggerUISound, addLog, t]);
+  }, [triggerUISound, addLog, t, user?.email]);
 
   const connectToAI = async () => {
     if (showLoginModal || showPaywall) return;
@@ -1191,13 +1405,12 @@ const App: React.FC = () => {
          - Tuyệt đối KHÔNG nói tên hàm kỹ thuật.
          - Khi cần tra cứu, hãy âm thầm thực hiện.
       4. QUY TẮC CHỐT ĐƠN (QUAN TRỌNG):
-         - Khi khách đã chọn xong sản phẩm, hãy nhắc lại giỏ hàng thật ngắn gọn và hỏi: 'Anh/chị có muốn lấy thêm sản phẩm nào nữa không ạ?'.
-         - Nếu khách muốn thêm, hãy tiếp tục tư vấn và cập nhật giỏ hàng; chỉ khi khách xác nhận 'thế là đủ rồi' thì mới chuyển sang bước xuất hóa đơn.
+         - Khi khách đã chọn sản phẩm và nói 'lấy luôn', 'xuất hóa đơn', 'chốt đơn': có thể hỏi TỐI ĐA MỘT LẦN 'Anh/chị có muốn lấy thêm sản phẩm nào nữa không ạ?'. Nếu khách trả lời: không / không ạ / không cần / với không / vậy thôi / đủ rồi / thế thôi / xuất hóa đơn nhé / chốt đi / không lấy thêm — thì COI NHƯ ĐÃ CHỐT ĐƠN. TUYỆT ĐỐI KHÔNG hỏi lại 'có muốn lấy thêm không' lần hai; chuyển NGAY sang xin Tên, Số điện thoại và Địa chỉ để xuất hóa đơn.
+         - Nếu khách nói muốn thêm, hãy tư vấn thêm; khi khách nói đủ rồi hoặc xuất hóa đơn thì áp dụng quy tắc trên (chỉ hỏi thêm tối đa một lần, nếu họ từ chối thì không hỏi nữa).
          - Trước khi gọi hàm tạo hóa đơn, BẮT BUỘC phải hỏi và ghi nhận đủ Tên, Số điện thoại và Địa chỉ của khách hàng.
-         - Sau khi hỏi đủ, hãy âm thầm gọi công cụ registerCustomer với đầy đủ name, phone, address để lưu thông tin.
-         - Chỉ được phép gọi createInvoice sau khi đã lưu thông tin khách hàng qua registerCustomer và khách đã xác nhận chốt đơn.
+         - Sau khi đã có đủ Tên, SĐT và Địa chỉ: đọc lại toàn bộ thông tin cho khách (ví dụ: 'Em xác nhận lại: anh/chị [tên], số điện thoại [số], địa chỉ [địa chỉ]. Thông tin đúng chưa ạ?') và chỉ khi khách xác nhận đúng mới gọi registerCustomer rồi createInvoice; nếu khách sửa thì cập nhật và đọc lại xác nhận lần nữa.
          - Trong lúc hệ thống xử lý hóa đơn, có thể nói: 'Dạ anh/chị chờ em một chút, em đang xuất hóa đơn ạ'.
-         - Sau khi hóa đơn đã tạo xong (dựa trên kết quả công cụ), hãy nói rõ: 'Em đã xuất hóa đơn và gửi cho anh/chị rồi, anh/chị kiểm tra giúp em nhé. Nếu cần mua thêm hay cần em tư vấn gì thêm thì cứ nói em ạ.'.
+         - Sau khi hóa đơn đã tạo xong, nói: 'Em đã xuất hóa đơn và gửi cho anh/chị rồi, anh/chị kiểm tra giúp em nhé. Nếu cần mua thêm hay cần em tư vấn gì thêm thì cứ nói em ạ.'.
 
       CHẾ ĐỘ: ${roleInstruction}
       DỮ LIỆU KHO: ${inventoryJson}
@@ -1205,7 +1418,7 @@ const App: React.FC = () => {
     `;
 
     let restorationPrompt: string | null = null;
-    const lastActive = localStorage.getItem('gemini_last_active_ts');
+    const lastActive = localStorage.getItem(getStorageKey('gemini_last_active_ts', user?.email));
     const hasHistory = transcriptions.length > 0;
     if (hasHistory && lastActive && (Date.now() - parseInt(lastActive)) < 15 * 60 * 1000) {
         const historySlice = transcriptions.slice(-3);
@@ -1476,7 +1689,10 @@ const App: React.FC = () => {
   const handleManualClearHistory = () => {
       triggerUISound('click');
       if (window.confirm(t.confirmClearHistory)) {
-          setTranscriptions([]); localStorage.removeItem('gemini_chat_history'); addLog('Deleted history.', 'info');
+          setTranscriptions([]);
+          localStorage.removeItem(getStorageKey('gemini_chat_history', user?.email));
+          localStorage.removeItem(getStorageKey('gemini_last_active_ts', user?.email));
+          addLog('Deleted history.', 'info');
       }
   };
 
@@ -1582,6 +1798,15 @@ const App: React.FC = () => {
 
   const renderSettingsTab = () => (
       <div className="space-y-8 animate-[fadeIn_0.3s_ease-out] pb-20">
+          {user && (
+          <div className="space-y-4">
+              <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest border-b border-white/5 pb-2">Tài khoản</h3>
+              <div className="flex justify-between items-center bg-slate-800/50 p-4 rounded-xl border border-slate-700">
+                  <div className="text-xs text-slate-400 truncate flex-1 mr-2">{user.email}</div>
+                  <button onClick={handleLogout} className="px-4 py-2 bg-red-600/20 hover:bg-red-600/40 border border-red-500/50 text-red-400 rounded-lg text-xs font-bold uppercase transition-colors">Đăng xuất</button>
+              </div>
+          </div>
+          )}
           <div className="space-y-4">
               <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest border-b border-white/5 pb-2">{t.subscription}</h3>
               <div className="flex justify-between items-center bg-gradient-to-r from-slate-800 to-slate-900 p-4 rounded-xl border border-white/10">
@@ -1723,6 +1948,31 @@ const App: React.FC = () => {
             {t.statusOffline} - {t.statusReconnecting}
         </div>
       )}
+
+      {/* Cảnh báo: Bị đăng xuất vì đăng nhập thiết bị khác (Premium 1 thiết bị) */}
+      {kickedMessage && (
+        <div className="fixed inset-0 z-[310] bg-black/90 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-orange-500/50 rounded-2xl max-w-sm w-full p-6 text-center shadow-2xl">
+            <div className="text-4xl mb-4">⚠️</div>
+            <h3 className="text-lg font-bold text-white mb-2">Đăng xuất thiết bị</h3>
+            <p className="text-slate-400 text-sm mb-6">{kickedMessage}</p>
+            <p className="text-[10px] text-slate-500 mb-4">Tài khoản Premium chỉ được dùng trên 1 thiết bị. Thiết bị mới đăng nhập sẽ thay thế thiết bị cũ.</p>
+            <button onClick={() => setKickedMessage(null)} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold text-sm">Đóng</button>
+          </div>
+        </div>
+      )}
+
+      {/* Thông báo: Đã đăng nhập thiết bị mới, thiết bị cũ đã bị đăng xuất */}
+      {deviceRegisteredRevoked && (
+        <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-4 md:max-w-sm z-[305] bg-orange-500/20 border border-orange-500/50 rounded-xl p-4 shadow-xl flex items-start gap-3">
+          <span className="text-2xl">📱</span>
+          <div className="flex-1 text-left">
+            <p className="text-xs font-bold text-orange-200">Bạn đã đăng nhập trên thiết bị mới.</p>
+            <p className="text-[10px] text-slate-400 mt-1">Thiết bị cũ đã bị đăng xuất (giới hạn 1 thiết bị cho tài khoản Premium).</p>
+          </div>
+          <button onClick={() => setDeviceRegisteredRevoked(false)} className="text-slate-400 hover:text-white text-lg leading-none">×</button>
+        </div>
+      )}
       
       {/* LOGIN MODAL */}
       {showLoginModal && (
@@ -1732,10 +1982,20 @@ const App: React.FC = () => {
                 <div className="w-16 h-16 bg-indigo-600 rounded-2xl mx-auto mb-6 flex items-center justify-center text-2xl font-black text-white shadow-lg shadow-indigo-500/50">BM</div>
                 <h2 className="text-2xl font-bold text-white mb-2">{t.loginTitle}</h2>
                 <p className="text-slate-400 text-sm mb-8">{t.loginDesc}</p>
-                <button onClick={handleLogin} className="w-full py-3 bg-white hover:bg-gray-100 text-slate-900 rounded-xl font-bold flex items-center justify-center gap-3 transition-all shadow-xl">
-                    <img src="https://www.svgrepo.com/show/475656/google-color.svg" className="w-5 h-5" alt="Google" />
-                    {t.btnLoginGoogle}
-                </button>
+                {googleClientId ? (
+                    <div className="w-full flex justify-center">
+                        <GoogleLogin
+                            onSuccess={handleGoogleLoginSuccess}
+                            onError={() => triggerUISound('click')}
+                            useOneTap={false}
+                        />
+                    </div>
+                ) : (
+                    <button onClick={handleLogin} className="w-full py-3 bg-white hover:bg-gray-100 text-slate-900 rounded-xl font-bold flex items-center justify-center gap-3 transition-all shadow-xl">
+                        <img src="https://www.svgrepo.com/show/475656/google-color.svg" className="w-5 h-5" alt="Google" />
+                        {t.btnLoginGoogle}
+                    </button>
+                )}
                 <p className="text-[10px] text-slate-600 mt-6">Secure Login • 14-Day Trial Included</p>
             </div>
         </div>
@@ -1745,7 +2005,26 @@ const App: React.FC = () => {
       {showPaywall && !showLoginModal && (
         <div className="fixed inset-0 z-[290] bg-slate-950/95 backdrop-blur-md flex items-center justify-center p-4">
             <div className="bg-slate-900 border border-red-500/30 rounded-2xl w-full max-w-4xl p-6 md:p-8 shadow-2xl overflow-y-auto max-h-[90vh]">
-                {!selectedPlan ? (
+                {paymentSuccess ? (
+                    <div className="flex flex-col items-center text-center py-8 animate-[fadeIn_0.3s_ease-out]">
+                        <div className="w-20 h-20 rounded-full bg-emerald-500/20 flex items-center justify-center mb-6">
+                            <span className="text-4xl">✓</span>
+                        </div>
+                        <h2 className="text-2xl font-black text-white mb-2">{t.paymentSuccess}</h2>
+                        <p className="text-slate-400 text-sm mb-6">{t.paymentSuccessDetail.replace('{start}', new Date(paymentSuccess.startDate).toLocaleDateString()).replace('{end}', new Date(paymentSuccess.endDate).toLocaleDateString())}</p>
+                        <div className="grid grid-cols-2 gap-4 w-full max-w-sm mb-8">
+                            <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+                                <div className="text-[10px] font-bold text-slate-500 uppercase mb-1">Ngày bắt đầu</div>
+                                <div className="text-lg font-bold text-white">{new Date(paymentSuccess.startDate).toLocaleDateString()}</div>
+                            </div>
+                            <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+                                <div className="text-[10px] font-bold text-slate-500 uppercase mb-1">Ngày kết thúc</div>
+                                <div className="text-lg font-bold text-white">{new Date(paymentSuccess.endDate).toLocaleDateString()}</div>
+                            </div>
+                        </div>
+                        <button onClick={handleClosePaymentSuccess} className="w-full max-w-xs py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold uppercase text-xs transition-colors">{t.back}</button>
+                    </div>
+                ) : !selectedPlan ? (
                     <>
                         <div className="flex justify-between items-start mb-8">
                             <div className="flex-1 text-center">
@@ -1790,11 +2069,11 @@ const App: React.FC = () => {
                         </div>
 
                         <button 
-                            onClick={handleSimulatePayment} 
+                            onClick={handleConfirmPayment} 
                             disabled={isVerifyingPayment}
                             className={`w-full max-w-xs py-3 rounded-xl font-bold uppercase tracking-widest text-xs transition-all ${isVerifyingPayment ? 'bg-slate-700 text-slate-500' : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-900/50'}`}
                         >
-                            {isVerifyingPayment ? t.checkingPayment : t.iHavePaid}
+                            {isVerifyingPayment ? (isApiConfigured() ? 'Đang chờ phản hồi từ SePay...' : t.checkingPayment) : t.iHavePaid}
                         </button>
                     </div>
                 )}
@@ -1871,10 +2150,12 @@ const App: React.FC = () => {
                     title="Click to see details"
                 >
                     <span className="text-yellow-400">★</span>
-                    {t.premiumBanner.replace('{start}', new Date(user.trialStartDate).toLocaleDateString()).replace('{end}', new Date(user.expiryDate).toLocaleDateString())}
+                    {t.premiumBanner.replace('{start}', new Date(user.premiumStartDate ?? user.trialStartDate).toLocaleDateString()).replace('{end}', new Date(user.expiryDate!).toLocaleDateString())}
                 </div>
             ) : null}
-            
+            {user && (
+                <button onClick={handleLogout} className="hidden sm:flex px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-[9px] font-bold uppercase text-slate-400 hover:text-red-400 hover:border-red-500/30 transition-colors" title="Đăng xuất">{user.email?.split('@')[0]}</button>
+            )}
             <button onClick={() => setIsStandby(true)} className="px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-[10px] font-black uppercase text-slate-400 hover:text-white transition-colors flex items-center gap-1" title={t.standbyMode}>
                  <span>🌙</span><span className="hidden sm:inline">{t.standbyMode}</span>
             </button>

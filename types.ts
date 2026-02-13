@@ -82,6 +82,7 @@ export interface UserProfile {
   trialStartDate: number;
   isPremium: boolean;
   expiryDate?: number;
+  premiumStartDate?: number; // Ngày bắt đầu gói premium (để hiển thị trên banner)
 }
 
 export interface PricingPlan {
